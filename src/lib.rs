@@ -123,6 +123,7 @@ mod document;
 mod huffman;
 mod meta;
 mod optimize;
+mod parallel;
 mod progressive;
 mod quant;
 mod resize;
@@ -143,7 +144,7 @@ pub use resize::{
 };
 pub use upright::{upright_jpeg, upright_jpeg_with};
 
-use crate::component::{Component, interleave_order};
+use crate::component::{Component, dct_quant, interleave_order};
 use crate::dct::dequant_scale;
 use crate::document::encode_document;
 use crate::quant::{BASE_QT_CHROMA, BASE_QT_LUMA, BASE_QT_PHOTO, scaled_quant_table};
@@ -200,6 +201,8 @@ pub struct Encoder {
     /// CMYK deringing component mask override (None = per-coding default).
     cmyk_dering: Option<u8>,
     progressive: bool,
+    /// Worker threads for the parallel stages; 0 = automatic.
+    threads: usize,
     icc: Option<Vec<u8>>,
     exif: Option<Vec<u8>>,
 }
@@ -324,6 +327,15 @@ const DERING_CAP_MAX: f32 = 64.0;
 const COEF_MAX: f32 = 1023.0;
 const DERING_SWEEPS: u32 = 10;
 
+/// Output slots for one band of MCU rows: (quantized, pre-rounding) blocks
+/// per component, and the gradient energy of each row.
+struct RowsOut<'a> {
+    y: (&'a mut [[i16; 64]], &'a mut [[f32; 64]]),
+    cb: (&'a mut [[i16; 64]], &'a mut [[f32; 64]]),
+    cr: (&'a mut [[i16; 64]], &'a mut [[f32; 64]]),
+    energy: &'a mut [(f64, f64)],
+}
+
 impl Encoder {
     /// New encoder at the given quality, on the usual 1-100 JPEG scale
     /// (values outside it are clamped, not rejected).
@@ -343,6 +355,7 @@ impl Encoder {
             dering: Some((DERING_CAP, DERING_SWEEPS, false)),
             cmyk_dering: None,
             progressive: true,
+            threads: 0,
             icc: None,
             exif: None,
         }
@@ -377,6 +390,15 @@ impl Encoder {
     /// downstream users pin their compatibility guarantees on it.
     pub fn progressive(mut self, on: bool) -> Self {
         self.progressive = on;
+        self
+    }
+
+    /// Number of worker threads used with the `parallel` feature. `0` (the
+    /// default) uses the available cores, up to 8. The output is the same
+    /// for any count; without the feature everything runs on the calling
+    /// thread.
+    pub fn threads(mut self, n: usize) -> Self {
+        self.threads = n;
         self
     }
 
@@ -643,98 +665,185 @@ impl Encoder {
             // to the coefficients, not to three full f32 planes. Strips are
             // padded to whole MCUs (edge replication baked in) so block
             // extraction is branch-free.
+            //
+            // MCU rows are independent, so bands of rows are encoded in
+            // parallel, each writing its blocks in place. The gradient energy
+            // is summed per row and then over rows in order, so it does not
+            // depend on how the rows were split.
             let ypw = lbw * 8;
             let cpw = mcu_w * 8;
-            let mut ystrip = vec![0f32; ypw * 8 * v2];
-            let mut cbstrip = vec![0f32; cpw * 8];
-            let mut crstrip = vec![0f32; cpw * 8];
-            let mut px = [0f32; 64];
-            for my in 0..mcu_h {
-                for r in 0..8 * v2 {
-                    let sy = (my * 8 * v2 + r).min(h - 1);
-                    let src = &rgb[sy * w * 3..][..w * 3];
-                    let dst = &mut ystrip[r * ypw..][..ypw];
-                    for x in 0..w {
-                        let (rr, gg, bb) = (
-                            src[x * 3] as f32,
-                            src[x * 3 + 1] as f32,
-                            src[x * 3 + 2] as f32,
-                        );
-                        dst[x] = 0.299 * rr + 0.587 * gg + 0.114 * bb;
-                    }
-                    let last = dst[w - 1];
-                    dst[w..].fill(last);
-                }
-                let cbcr = |p: &[u8]| -> (f32, f32) {
-                    let (rr, gg, bb) = (p[0] as f32, p[1] as f32, p[2] as f32);
-                    (
-                        -0.168736 * rr - 0.331264 * gg + 0.5 * bb + 128.0,
-                        0.5 * rr - 0.418688 * gg - 0.081312 * bb + 128.0,
-                    )
-                };
-                if h2 == 2 {
-                    // 4:2:0 — per-pixel conversion, then the same box average
-                    // (identical arithmetic order to the old plane pipeline).
-                    for r in 0..8 {
-                        // Clamp in chroma sample space so padded rows replicate
-                        // the last real chroma row (not a recomputed variant).
-                        let cy = (my * 8 + r).min(chh - 1);
-                        let y0 = (cy * 2).min(h - 1);
-                        let y1 = (cy * 2 + 1).min(h - 1);
-                        for cx in 0..cw {
-                            let x0 = (cx * 2).min(w - 1);
-                            let x1 = (cx * 2 + 1).min(w - 1);
-                            let (b00, r00) = cbcr(&rgb[(y0 * w + x0) * 3..][..3]);
-                            let (b01, r01) = cbcr(&rgb[(y0 * w + x1) * 3..][..3]);
-                            let (b10, r10) = cbcr(&rgb[(y1 * w + x0) * 3..][..3]);
-                            let (b11, r11) = cbcr(&rgb[(y1 * w + x1) * 3..][..3]);
-                            cbstrip[r * cpw + cx] = (b00 + b01 + b10 + b11) * 0.25;
-                            crstrip[r * cpw + cx] = (r00 + r01 + r10 + r11) * 0.25;
-                        }
-                        let (lb, lr) = (cbstrip[r * cpw + cw - 1], crstrip[r * cpw + cw - 1]);
-                        cbstrip[r * cpw + cw..(r + 1) * cpw].fill(lb);
-                        crstrip[r * cpw + cw..(r + 1) * cpw].fill(lr);
-                    }
-                } else {
-                    for r in 0..8 {
-                        let sy = (my * 8 + r).min(h - 1);
-                        for x in 0..w {
-                            let (b, rr) = cbcr(&rgb[(sy * w + x) * 3..][..3]);
-                            cbstrip[r * cpw + x] = b;
-                            crstrip[r * cpw + x] = rr;
-                        }
-                        let (lb, lr) = (cbstrip[r * cpw + w - 1], crstrip[r * cpw + w - 1]);
-                        cbstrip[r * cpw + w..(r + 1) * cpw].fill(lb);
-                        crstrip[r * cpw + w..(r + 1) * cpw].fill(lr);
-                    }
-                }
-                for br in 0..v2 {
-                    for bx in 0..lbw {
-                        for yy in 0..8 {
-                            let row = &ystrip[(br * 8 + yy) * ypw + bx * 8..][..8];
-                            for (d, &sv) in px[yy * 8..yy * 8 + 8].iter_mut().zip(row) {
-                                *d = sv - 128.0;
-                            }
-                        }
-                        if let Some(d) = &der {
-                            d.apply(&mut px);
-                        }
-                        comps[0].push_block(&mut px, &recip_l);
-                    }
-                }
-                for (ci, strip) in [(1usize, &cbstrip), (2, &crstrip)] {
-                    for bx in 0..mcu_w {
-                        for yy in 0..8 {
-                            let row = &strip[yy * cpw + bx * 8..][..8];
-                            for (d, &sv) in px[yy * 8..yy * 8 + 8].iter_mut().zip(row) {
-                                *d = sv - 128.0;
-                            }
-                        }
-                        comps[ci].push_block(&mut px, &recip_c);
-                    }
-                }
+            let (luma_row, chroma_row) = (lbw * v2, mcu_w);
+            let track_energy = comps[0].energy;
+            for c in comps.iter_mut() {
+                let n = c.blocks.capacity();
+                c.blocks.resize(n, [0; 64]);
+                c.raw.resize(n, [0.0; 64]);
             }
-
+            let mut row_energy = vec![(0f64, 0f64); mcu_h];
+            let encode_rows = |first: usize, out: RowsOut<'_>| {
+                let RowsOut { y, cb, cr, energy } = out;
+                let mut ystrip = vec![0f32; ypw * 8 * v2];
+                let mut cbstrip = vec![0f32; cpw * 8];
+                let mut crstrip = vec![0f32; cpw * 8];
+                let mut px = [0f32; 64];
+                for (k, e) in energy.iter_mut().enumerate() {
+                    let my = first + k;
+                    for r in 0..8 * v2 {
+                        let sy = (my * 8 * v2 + r).min(h - 1);
+                        let src = &rgb[sy * w * 3..][..w * 3];
+                        let dst = &mut ystrip[r * ypw..][..ypw];
+                        for x in 0..w {
+                            let (rr, gg, bb) = (
+                                src[x * 3] as f32,
+                                src[x * 3 + 1] as f32,
+                                src[x * 3 + 2] as f32,
+                            );
+                            dst[x] = 0.299 * rr + 0.587 * gg + 0.114 * bb;
+                        }
+                        let last = dst[w - 1];
+                        dst[w..].fill(last);
+                    }
+                    let cbcr = |p: &[u8]| -> (f32, f32) {
+                        let (rr, gg, bb) = (p[0] as f32, p[1] as f32, p[2] as f32);
+                        (
+                            -0.168736 * rr - 0.331264 * gg + 0.5 * bb + 128.0,
+                            0.5 * rr - 0.418688 * gg - 0.081312 * bb + 128.0,
+                        )
+                    };
+                    if h2 == 2 {
+                        // 4:2:0 — per-pixel conversion, then the same box average
+                        // (identical arithmetic order to the old plane pipeline).
+                        for r in 0..8 {
+                            // Clamp in chroma sample space so padded rows replicate
+                            // the last real chroma row (not a recomputed variant).
+                            let cy = (my * 8 + r).min(chh - 1);
+                            let y0 = (cy * 2).min(h - 1);
+                            let y1 = (cy * 2 + 1).min(h - 1);
+                            for cx in 0..cw {
+                                let x0 = (cx * 2).min(w - 1);
+                                let x1 = (cx * 2 + 1).min(w - 1);
+                                let (b00, r00) = cbcr(&rgb[(y0 * w + x0) * 3..][..3]);
+                                let (b01, r01) = cbcr(&rgb[(y0 * w + x1) * 3..][..3]);
+                                let (b10, r10) = cbcr(&rgb[(y1 * w + x0) * 3..][..3]);
+                                let (b11, r11) = cbcr(&rgb[(y1 * w + x1) * 3..][..3]);
+                                cbstrip[r * cpw + cx] = (b00 + b01 + b10 + b11) * 0.25;
+                                crstrip[r * cpw + cx] = (r00 + r01 + r10 + r11) * 0.25;
+                            }
+                            let (lb, lr) = (cbstrip[r * cpw + cw - 1], crstrip[r * cpw + cw - 1]);
+                            cbstrip[r * cpw + cw..(r + 1) * cpw].fill(lb);
+                            crstrip[r * cpw + cw..(r + 1) * cpw].fill(lr);
+                        }
+                    } else {
+                        for r in 0..8 {
+                            let sy = (my * 8 + r).min(h - 1);
+                            for x in 0..w {
+                                let (b, rr) = cbcr(&rgb[(sy * w + x) * 3..][..3]);
+                                cbstrip[r * cpw + x] = b;
+                                crstrip[r * cpw + x] = rr;
+                            }
+                            let (lb, lr) = (cbstrip[r * cpw + w - 1], crstrip[r * cpw + w - 1]);
+                            cbstrip[r * cpw + w..(r + 1) * cpw].fill(lb);
+                            crstrip[r * cpw + w..(r + 1) * cpw].fill(lr);
+                        }
+                    }
+                    let (yb, yr) = (
+                        &mut y.0[k * luma_row..][..luma_row],
+                        &mut y.1[k * luma_row..][..luma_row],
+                    );
+                    let mut slot = 0;
+                    for br in 0..v2 {
+                        for bx in 0..lbw {
+                            for yy in 0..8 {
+                                let row = &ystrip[(br * 8 + yy) * ypw + bx * 8..][..8];
+                                for (d, &sv) in px[yy * 8..yy * 8 + 8].iter_mut().zip(row) {
+                                    *d = sv - 128.0;
+                                }
+                            }
+                            if let Some(d) = &der {
+                                d.apply(&mut px);
+                            }
+                            dct_quant(
+                                &mut px,
+                                &recip_l,
+                                &mut yb[slot],
+                                &mut yr[slot],
+                                track_energy.then_some(&mut *e),
+                            );
+                            slot += 1;
+                        }
+                    }
+                    for (strip, (blocks, raw)) in [
+                        (
+                            &cbstrip,
+                            (
+                                &mut cb.0[k * chroma_row..][..chroma_row],
+                                &mut cb.1[k * chroma_row..][..chroma_row],
+                            ),
+                        ),
+                        (
+                            &crstrip,
+                            (
+                                &mut cr.0[k * chroma_row..][..chroma_row],
+                                &mut cr.1[k * chroma_row..][..chroma_row],
+                            ),
+                        ),
+                    ] {
+                        for bx in 0..mcu_w {
+                            for yy in 0..8 {
+                                let row = &strip[yy * cpw + bx * 8..][..8];
+                                for (d, &sv) in px[yy * 8..yy * 8 + 8].iter_mut().zip(row) {
+                                    *d = sv - 128.0;
+                                }
+                            }
+                            dct_quant(&mut px, &recip_c, &mut blocks[bx], &mut raw[bx], None);
+                        }
+                    }
+                }
+            };
+            {
+                let [cy, ccb, ccr] = comps.as_mut_slice() else {
+                    unreachable!("RGB encodes three components")
+                };
+                let workers = parallel::threads(self.threads).min(mcu_h).max(1);
+                let band = mcu_h.div_ceil(workers);
+                let bands = cy
+                    .blocks
+                    .chunks_mut(band * luma_row)
+                    .zip(cy.raw.chunks_mut(band * luma_row))
+                    .zip(
+                        ccb.blocks
+                            .chunks_mut(band * chroma_row)
+                            .zip(ccb.raw.chunks_mut(band * chroma_row)),
+                    )
+                    .zip(
+                        ccr.blocks
+                            .chunks_mut(band * chroma_row)
+                            .zip(ccr.raw.chunks_mut(band * chroma_row)),
+                    )
+                    .zip(row_energy.chunks_mut(band))
+                    .enumerate()
+                    .map(|(i, ((((yb, yr), cb), cr), energy))| {
+                        (
+                            i * band,
+                            RowsOut {
+                                y: (yb, yr),
+                                cb,
+                                cr,
+                                energy,
+                            },
+                        )
+                    });
+                parallel::for_each(bands, |(first, out)| encode_rows(first, out));
+            }
+            if track_energy {
+                let (mut e_low, mut e_all) = (0f64, 0f64);
+                for (l, a) in &row_energy {
+                    e_low += l;
+                    e_all += a;
+                }
+                comps[0].e_low = e_low;
+                comps[0].e_all = e_all;
+            }
             comps
         };
 
@@ -767,6 +876,7 @@ impl Encoder {
             self.deadzone,
             self.aq_lite,
             true,
+            self.threads,
         )
     }
 
@@ -843,6 +953,7 @@ impl Encoder {
             self.deadzone,
             self.aq_lite,
             true,
+            self.threads,
         )
     }
 }
@@ -1133,6 +1244,64 @@ mod meta_tests {
                         let k = mk().encode_cmyk(&cmyk, w, h, adobe);
                         assert_symbols_in_range(&k, &format!("cmyk {adobe:?} {tag}"));
                         assert!(decode_cmyk(&k).is_some(), "cmyk {adobe:?} {tag}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod parallel_tests {
+    use super::*;
+
+    /// Gradient + xorshift noise with flat panels, at odd sizes so MCU
+    /// padding and uneven bands are exercised.
+    fn image(w: u32, h: u32) -> Vec<u8> {
+        let mut s = 0x2545_f491_4f6c_dd1du64;
+        let mut px = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                let n = (s >> 58) as u8;
+                if (x / 40 + y / 30) % 3 == 0 {
+                    px.extend_from_slice(&[230, 232, 235]);
+                } else {
+                    px.extend_from_slice(&[
+                        (x % 256) as u8 ^ n,
+                        (y % 256) as u8,
+                        n.wrapping_mul(4),
+                    ]);
+                }
+            }
+        }
+        px
+    }
+
+    #[test]
+    fn output_is_identical_for_every_thread_count() {
+        for (w, h) in [(333u32, 251u32), (17, 9), (8, 300), (640, 16)] {
+            let rgb = image(w, h);
+            for sampling in [Sampling::S420, Sampling::S444] {
+                for progressive in [true, false] {
+                    for quality in [50u8, 93] {
+                        let enc = |t: usize| {
+                            Encoder::new(quality)
+                                .sampling(sampling)
+                                .progressive(progressive)
+                                .threads(t)
+                                .encode_rgb(&rgb, w, h)
+                        };
+                        let one = enc(1);
+                        assert!(decode_jpeg(&one).is_some(), "{w}x{h} undecodable");
+                        for t in [2, 3, 8, 0] {
+                            assert!(
+                                one == enc(t),
+                                "{w}x{h} {sampling:?} progressive={progressive} q{quality} differs at {t} threads"
+                            );
+                        }
                     }
                 }
             }

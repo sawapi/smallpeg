@@ -39,9 +39,66 @@ fn nonzero_mask(blk: &[i16; 64]) -> u64 {
 pub(crate) fn for_each_symbol(
     comps: &[Component],
     order: &[(usize, usize)],
+    f: impl FnMut(usize, u8, u8, u16),
+) {
+    for_each_symbol_from(comps, order, vec![0i32; comps.len()], f);
+}
+
+/// Symbol counts per table and the total amplitude bits of
+/// `for_each_symbol`, counted over chunks of `order` in parallel. Each chunk
+/// starts from the DC predictors left by the blocks before it, so the sums
+/// are the same however `order` is split.
+pub(crate) fn symbol_stats(
+    comps: &[Component],
+    order: &[(usize, usize)],
+    n_tables: usize,
+    threads: usize,
+) -> (Vec<[u32; 256]>, u64) {
+    let ranges = threads.clamp(1, order.len().max(1));
+    let len = order.len().div_ceil(ranges).max(1);
+    let mut starts = Vec::with_capacity(ranges);
+    let mut prev_dc = vec![0i32; comps.len()];
+    for (i, chunk) in order.chunks(len).enumerate() {
+        starts.push((i * len, chunk.len(), prev_dc.clone()));
+        for &(ci, bi) in chunk {
+            prev_dc[ci] = comps[ci].blocks[bi][0] as i32;
+        }
+    }
+    let parts = crate::parallel::map(threads, &starts, |(start, count, prev)| {
+        let mut freqs = vec![[0u32; 256]; n_tables];
+        let mut payload = 0u64;
+        for_each_symbol_from(
+            comps,
+            &order[*start..][..*count],
+            prev.clone(),
+            |tbl, sym, n, _| {
+                freqs[tbl][sym as usize] += 1;
+                payload += n as u64;
+            },
+        );
+        (freqs, payload)
+    });
+    let mut freqs = vec![[0u32; 256]; n_tables];
+    let mut payload = 0u64;
+    for (f, p) in parts {
+        for (dst, src) in freqs.iter_mut().zip(&f) {
+            for (d, s) in dst.iter_mut().zip(src) {
+                *d += s;
+            }
+        }
+        payload += p;
+    }
+    (freqs, payload)
+}
+
+/// `for_each_symbol` over part of the interleave order, starting from the
+/// given per-component DC predictors.
+fn for_each_symbol_from(
+    comps: &[Component],
+    order: &[(usize, usize)],
+    mut prev_dc: Vec<i32>,
     mut f: impl FnMut(usize, u8, u8, u16),
 ) {
-    let mut prev_dc = vec![0i32; comps.len()];
     for &(ci, bi) in order {
         let c = &comps[ci];
         let blk = &c.blocks[bi];
@@ -271,6 +328,42 @@ fn for_each_ac_refine_symbol(
 pub(crate) struct SparseAc {
     offsets: Vec<u32>,
     entries: Vec<(u8, i16)>,
+}
+
+/// Same result as `sparse_ac`, built over bands of block rows in parallel.
+pub(crate) fn sparse_ac_par(c: &Component, threads: usize) -> SparseAc {
+    let bands = threads.clamp(1, c.ah.max(1));
+    if bands == 1 {
+        return sparse_ac(c);
+    }
+    let rows = c.ah.div_ceil(bands);
+    let starts: Vec<usize> = (0..c.ah).step_by(rows).collect();
+    let parts = crate::parallel::map(threads, &starts, |&first| {
+        let mut ends = Vec::with_capacity(rows * c.aw);
+        let mut entries = Vec::new();
+        for by in first..(first + rows).min(c.ah) {
+            for bx in 0..c.aw {
+                let blk = &c.blocks[by * c.bw + bx];
+                for (k, &v) in blk.iter().enumerate().skip(1) {
+                    if v != 0 {
+                        entries.push((k as u8, v));
+                    }
+                }
+                ends.push(entries.len() as u32);
+            }
+        }
+        (ends, entries)
+    });
+    let total = parts.iter().map(|p| p.1.len()).sum();
+    let mut offsets = Vec::with_capacity(c.aw * c.ah + 1);
+    let mut entries = Vec::with_capacity(total);
+    offsets.push(0u32);
+    for (ends, part) in parts {
+        let base = entries.len() as u32;
+        offsets.extend(ends.iter().map(|&e| base + e));
+        entries.extend_from_slice(&part);
+    }
+    SparseAc { offsets, entries }
 }
 
 pub(crate) fn sparse_ac(c: &Component) -> SparseAc {

@@ -1247,7 +1247,7 @@ pub(crate) fn encode_parsed(placed: Placed, p: Parsed, allow_progressive: bool) 
     let mut prog_head = head;
     emit_sof(&mut prog_head, 0xC2);
     prog_head.extend_from_slice(&after_frame);
-    let mut prog = encode_progressive_scans(&comps, &order, prog_head);
+    let mut prog = encode_progressive_scans(&comps, &order, prog_head, 0);
     let eoi = prog.len() - 2;
     prog.splice(eoi..eoi, before_end);
     if prog.len() <= baseline.len() {

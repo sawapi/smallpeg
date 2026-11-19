@@ -59,29 +59,50 @@ impl Component {
 
     /// DCT + quantize one level-shifted 8x8 block and append it.
     pub(crate) fn push_block(&mut self, px: &mut [f32; 64], recip: &[f32; 64]) {
-        fdct8x8(px);
         let mut zz = [0i16; 64];
         let mut t = [0f32; 64];
-        for i in 0..64 {
-            // Baseline 8-bit JPEG codes AC magnitudes up to 1023 (size 10)
-            // and DC values in [-1024, 1023]. 8-bit samples stay inside
-            // that by construction; this guards anything that could push
-            // past it (samples beyond the clip points, rounding at step 1),
-            // since strict decoders reject the whole file otherwise.
-            t[i] = (px[ZIGZAG[i]] * recip[ZIGZAG[i]]).clamp(-COEF_MAX, COEF_MAX);
-            zz[i] = t[i].round() as i16;
-        }
-        if self.energy {
-            for i in 1..64 {
-                let e = (px[ZIGZAG[i]] * px[ZIGZAG[i]]) as f64;
-                self.e_all += e;
-                if i <= 5 {
-                    self.e_low += e;
-                }
-            }
-        }
+        let mut energy = (self.e_low, self.e_all);
+        dct_quant(
+            px,
+            recip,
+            &mut zz,
+            &mut t,
+            self.energy.then_some(&mut energy),
+        );
+        (self.e_low, self.e_all) = energy;
         self.blocks.push(zz);
         self.raw.push(t);
+    }
+}
+
+/// DCT + quantize one level-shifted 8x8 block into `zz` (quantized) and `t`
+/// (pre-rounding), both in zigzag order. If `energy` is given, the block's
+/// pre-quantization AC energy is added to it as (zigzag 1..=5, all).
+pub(crate) fn dct_quant(
+    px: &mut [f32; 64],
+    recip: &[f32; 64],
+    zz: &mut [i16; 64],
+    t: &mut [f32; 64],
+    energy: Option<&mut (f64, f64)>,
+) {
+    fdct8x8(px);
+    for i in 0..64 {
+        // Baseline 8-bit JPEG codes AC magnitudes up to 1023 (size 10)
+        // and DC values in [-1024, 1023]. 8-bit samples stay inside
+        // that by construction; this guards anything that could push
+        // past it (samples beyond the clip points, rounding at step 1),
+        // since strict decoders reject the whole file otherwise.
+        t[i] = (px[ZIGZAG[i]] * recip[ZIGZAG[i]]).clamp(-COEF_MAX, COEF_MAX);
+        zz[i] = t[i].round() as i16;
+    }
+    if let Some((e_low, e_all)) = energy {
+        for i in 1..64 {
+            let e = (px[ZIGZAG[i]] * px[ZIGZAG[i]]) as f64;
+            *e_all += e;
+            if i <= 5 {
+                *e_low += e;
+            }
+        }
     }
 }
 

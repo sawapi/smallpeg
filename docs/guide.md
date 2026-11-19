@@ -130,9 +130,12 @@ in CI.
 
 ## Threads
 
-The optional `parallel` feature runs trellis quantization across cores
-with `std::thread` (no extra dependencies). The output is byte-identical.
-It is not available on `wasm32-unknown-unknown`.
+The optional `parallel` feature spreads encoding across cores with
+`std::thread` (no extra dependencies): color conversion and DCT, trellis
+quantization, and the progressive scan search and output. `Encoder::threads`
+sets the number of threads (by default the available cores, up to 8). The
+output is byte-identical for any thread count. It is not available on
+`wasm32-unknown-unknown`.
 
 ```toml
 smallpeg = { version = "0.15", features = ["parallel"] }
