@@ -26,7 +26,8 @@ pub(crate) fn encode_document(
     jfif: bool,
     threads: usize,
 ) -> Vec<u8> {
-    let threads = crate::parallel::threads(threads);
+    let blocks = comps.iter().map(|c| c.blocks.len()).sum();
+    let threads = crate::parallel::threads(threads, blocks);
     // Trellis distortion weights per quant table (zigzag order); gamma 0
     // leaves every weight at exactly 1.0, i.e. plain step units.
     let freq_wts: Vec<[f32; 64]> = qts
@@ -146,42 +147,25 @@ pub(crate) fn encode_document(
                     1.0
                 };
             let m = &mults[ci];
-            #[cfg(feature = "parallel")]
-            {
-                // Blocks are independent, so chunked scoped threads produce
-                // byte-identical output in any interleaving.
-                let n = c.blocks.len();
-                let chunk = n.div_ceil(threads.max(1));
-                let raw = &c.raw;
-                std::thread::scope(|sc| {
-                    for (t, (bch, rch)) in c
-                        .blocks
-                        .chunks_mut(chunk)
-                        .zip(raw.chunks(chunk))
-                        .enumerate()
-                    {
-                        let base = t * chunk;
-                        let aqm = &aq_mults[ci];
-                        sc.spawn(move || {
-                            for (i, (blk, rw)) in bch.iter_mut().zip(rch).enumerate() {
-                                let mut lb = if m.is_empty() { lam } else { lam * m[base + i] };
-                                if !aqm.is_empty() {
-                                    lb *= aqm[base + i];
-                                }
-                                trellis_ac(rw, blk, bits, lb, wt);
-                            }
-                        });
+            // Blocks are independent, so chunks of them on separate threads
+            // produce byte-identical output in any interleaving.
+            let chunk = c.blocks.len().div_ceil(threads).max(1);
+            let (raw, aqm) = (&c.raw, &aq_mults[ci]);
+            let chunks = c
+                .blocks
+                .chunks_mut(chunk)
+                .zip(raw.chunks(chunk))
+                .enumerate();
+            crate::parallel::for_each(chunks, |(t, (bch, rch))| {
+                let base = t * chunk;
+                for (i, (blk, rw)) in bch.iter_mut().zip(rch).enumerate() {
+                    let mut lb = if m.is_empty() { lam } else { lam * m[base + i] };
+                    if !aqm.is_empty() {
+                        lb *= aqm[base + i];
                     }
-                });
-            }
-            #[cfg(not(feature = "parallel"))]
-            for (bi, (blk, raw)) in c.blocks.iter_mut().zip(&c.raw).enumerate() {
-                let mut lb = if m.is_empty() { lam } else { lam * m[bi] };
-                if !aq_mults[ci].is_empty() {
-                    lb *= aq_mults[ci][bi];
+                    trellis_ac(rw, blk, bits, lb, wt);
                 }
-                trellis_ac(raw, blk, bits, lb, wt);
-            }
+            });
         }
     };
 

@@ -46,7 +46,8 @@ pub(crate) fn encode_progressive_scans(
     threads: usize,
 ) -> Vec<u8> {
     use ScanSpec::*;
-    let threads = crate::parallel::threads(threads);
+    let blocks = comps.iter().map(|c| c.blocks.len()).sum();
+    let threads = crate::parallel::threads(threads, blocks);
 
     // Sparse (CSR) views of the AC coefficients: the scan search and the
     // AC scan emission only ever touch nonzero coefficients, which is what
@@ -102,14 +103,15 @@ pub(crate) fn encode_progressive_scans(
 
     // All the costs below are independent, so they run as parallel tasks
     // (luma first, as it is the largest). One walk over a component's
-    // coefficients can price several bands, so bands are priced in groups.
+    // coefficients can price several bands, so bands are priced in groups:
+    // a few with workers to share them, and all in one walk without.
     const SPLITS: [usize; 3] = [2, 5, 8];
-    const BAND_GROUPS: usize = 3;
+    let band_groups = if threads > 1 { 3 } else { 1 };
     let mut bands = vec![(1usize, 63usize)];
     for sp in SPLITS {
         bands.extend([(1, sp), (sp + 1, 63)]);
     }
-    let groups: Vec<&[(usize, usize)]> = bands.chunks(bands.len().div_ceil(BAND_GROUPS)).collect();
+    let groups: Vec<&[(usize, usize)]> = bands.chunks(bands.len().div_ceil(band_groups)).collect();
     enum Task<'a> {
         Bands(usize, &'a [(usize, usize)]),
         Refine(usize, u8),
@@ -263,9 +265,9 @@ pub(crate) fn encode_progressive_scans(
     };
 
     // Every scan is a self-contained segment (DHT, SOS, byte-aligned entropy
-    // data), so they can be written independently and concatenated.
-    let segments = crate::parallel::map(threads, &scans, |spec| {
-        let mut out = Vec::new();
+    // data), so with workers they are written independently and then
+    // concatenated; without, each is appended to the output directly.
+    let write_scan = |spec: &ScanSpec, mut out: Vec<u8>| {
         match *spec {
             DcFirst { al, ref freqs } => {
                 let tables: Vec<HuffTable> = freqs.iter().map(build_huff_table).collect();
@@ -336,9 +338,15 @@ pub(crate) fn encode_progressive_scans(
             }
         }
         out
-    });
-    for segment in segments {
-        out.extend_from_slice(&segment);
+    };
+    if threads > 1 {
+        for segment in crate::parallel::map(threads, &scans, |spec| write_scan(spec, Vec::new())) {
+            out.extend_from_slice(&segment);
+        }
+    } else {
+        for spec in &scans {
+            out = write_scan(spec, out);
+        }
     }
 
     out.extend_from_slice(&[0xFF, 0xD9]); // EOI

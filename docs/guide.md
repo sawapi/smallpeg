@@ -133,7 +133,8 @@ in CI.
 The optional `parallel` feature spreads encoding across cores with
 `std::thread` (no extra dependencies): color conversion and DCT, trellis
 quantization, and the progressive scan search and output. `Encoder::threads`
-sets the number of threads (by default the available cores, up to 8). The
+sets the number of threads (by default the available cores, up to 8; at
+most 64). Small images use fewer, where threads would not pay off. The
 output is byte-identical for any thread count. It is not available on
 `wasm32-unknown-unknown`.
 

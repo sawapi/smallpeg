@@ -1,20 +1,34 @@
 //! Worker-thread helpers for the `parallel` feature.
 
-/// Worker count for `Encoder::threads`: the requested count, or with 0 the
-/// available cores up to 8. Always 1 without the `parallel` feature.
+/// The most workers `Encoder::threads` gives: every stage starts a thread
+/// per worker, so a larger request only costs time.
 #[cfg(feature = "parallel")]
-pub(crate) fn threads(requested: usize) -> usize {
-    if requested != 0 {
-        return requested;
-    }
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(8)
+const MAX_THREADS: usize = 64;
+
+/// Blocks of an image that make one more worker worth starting: below
+/// this the threads cost more than they save.
+#[cfg(feature = "parallel")]
+const BLOCKS_PER_WORKER: usize = 1024;
+
+/// Worker count for an image of `blocks` blocks: the count requested with
+/// `Encoder::threads` up to `MAX_THREADS`, or with 0 the available cores
+/// up to 8, and no more than the image has work for. Always 1 without the
+/// `parallel` feature.
+#[cfg(feature = "parallel")]
+pub(crate) fn threads(requested: usize, blocks: usize) -> usize {
+    let wanted = if requested != 0 {
+        requested.min(MAX_THREADS)
+    } else {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(8)
+    };
+    wanted.min(blocks / BLOCKS_PER_WORKER).max(1)
 }
 
 #[cfg(not(feature = "parallel"))]
-pub(crate) fn threads(_requested: usize) -> usize {
+pub(crate) fn threads(_requested: usize, _blocks: usize) -> usize {
     1
 }
 
@@ -63,7 +77,8 @@ pub(crate) fn map<T: Sync, R: Send>(
 }
 
 /// Runs `job` on every item, one scoped thread per item (the first one on the
-/// calling thread). Without the `parallel` feature it is a plain loop.
+/// calling thread), so callers pass no more items than `threads` allows.
+/// Without the `parallel` feature it is a plain loop.
 pub(crate) fn for_each<T: Send, F: Fn(T) + Sync>(items: impl Iterator<Item = T>, job: F) {
     #[cfg(feature = "parallel")]
     {

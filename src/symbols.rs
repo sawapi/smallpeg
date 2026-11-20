@@ -55,6 +55,16 @@ pub(crate) fn symbol_stats(
     threads: usize,
 ) -> (Vec<[u32; 256]>, u64) {
     let ranges = threads.clamp(1, order.len().max(1));
+    if ranges == 1 {
+        // One pass, with no walk ahead for the predictors.
+        let mut freqs = vec![[0u32; 256]; n_tables];
+        let mut payload = 0u64;
+        for_each_symbol(comps, order, |tbl, sym, n, _| {
+            freqs[tbl][sym as usize] += 1;
+            payload += n as u64;
+        });
+        return (freqs, payload);
+    }
     let len = order.len().div_ceil(ranges).max(1);
     let mut starts = Vec::with_capacity(ranges);
     let mut prev_dc = vec![0i32; comps.len()];

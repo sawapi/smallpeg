@@ -250,14 +250,22 @@ fn tracks_gradient(e: &Encoder) -> bool {
     e.table_tweak == (1.0, 0.0) && e.quant == QuantPreset::Photo && e.quality > 60
 }
 
+/// The share of AC energy in the lowest frequencies from which a component
+/// counts as a gradient.
+const GRADIENT_RATIO: f64 = 0.70;
+
+fn gradient_ratio(e_low: f64, e_all: f64) -> f64 {
+    e_low / e_all.max(f64::MIN_POSITIVE)
+}
+
 fn is_gradient(c: &Component) -> bool {
-    let ratio = c.e_low / c.e_all.max(f64::MIN_POSITIVE);
+    let ratio = gradient_ratio(c.e_low, c.e_all);
     let nz: usize = c
         .blocks
         .iter()
         .map(|b| b[1..].iter().filter(|&&v| v != 0).count())
         .sum();
-    ratio >= 0.70 && nz as f64 / c.blocks.len() as f64 <= 6.0
+    ratio >= GRADIENT_RATIO && nz as f64 / c.blocks.len() as f64 <= 6.0
 }
 
 /// Geometric blend of every step toward 16 — i.e. dynamic-range
@@ -327,6 +335,22 @@ const DERING_CAP_MAX: f32 = 64.0;
 const COEF_MAX: f32 = 1023.0;
 const DERING_SWEEPS: u32 = 10;
 
+#[cfg(test)]
+thread_local! {
+    /// Makes the RGB encoder take its one-band second pass regardless of
+    /// the energy it found, so tests can reach that path.
+    static FORCE_ONE_BAND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The gradient energy (low, all) the RGB encoder last settled on.
+    static LAST_ENERGY: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((0.0, 0.0)) };
+}
+
+fn force_one_band() -> bool {
+    #[cfg(test)]
+    return FORCE_ONE_BAND.with(|f| f.get());
+    #[cfg(not(test))]
+    false
+}
+
 /// Output slots for one band of MCU rows: (quantized, pre-rounding) blocks
 /// per component, and the gradient energy of each row.
 struct RowsOut<'a> {
@@ -394,9 +418,11 @@ impl Encoder {
     }
 
     /// Number of worker threads used with the `parallel` feature. `0` (the
-    /// default) uses the available cores, up to 8. The output is the same
-    /// for any count; without the feature everything runs on the calling
-    /// thread.
+    /// default) uses the available cores, up to 8; a count above 64 is
+    /// taken as 64. Small images use fewer than asked for, down to the
+    /// calling thread alone, since starting threads would cost more than
+    /// it saves. The output is the same for any count; without the feature
+    /// everything runs on the calling thread.
     pub fn threads(mut self, n: usize) -> Self {
         self.threads = n;
         self
@@ -667,26 +693,35 @@ impl Encoder {
             // extraction is branch-free.
             //
             // MCU rows are independent, so bands of rows are encoded in
-            // parallel, each writing its blocks in place. The gradient energy
-            // is summed per row and then over rows in order, so it does not
-            // depend on how the rows were split.
+            // parallel, each writing its blocks in place.
+            //
+            // The gradient energy is one running sum over all blocks in
+            // order, and the sum's rounding depends on that order. A single
+            // band keeps it (`carry`: each row goes on from the one before).
+            // Several bands sum each row by itself, then the rows in order,
+            // which does not depend on how the rows were split but can
+            // round differently: enough to matter only when the result is
+            // at the threshold, and then the rows are done again as one band.
             let ypw = lbw * 8;
             let cpw = mcu_w * 8;
             let (luma_row, chroma_row) = (lbw * v2, mcu_w);
             let track_energy = comps[0].energy;
-            for c in comps.iter_mut() {
-                let n = c.blocks.capacity();
-                c.blocks.resize(n, [0; 64]);
-                c.raw.resize(n, [0.0; 64]);
+            for (c, row) in comps.iter_mut().zip([luma_row, chroma_row, chroma_row]) {
+                c.blocks = vec![[0; 64]; row * mcu_h];
+                c.raw = vec![[0.0; 64]; row * mcu_h];
             }
             let mut row_energy = vec![(0f64, 0f64); mcu_h];
-            let encode_rows = |first: usize, out: RowsOut<'_>| {
+            let encode_rows = |first: usize, out: RowsOut<'_>, carry: bool| {
                 let RowsOut { y, cb, cr, energy } = out;
                 let mut ystrip = vec![0f32; ypw * 8 * v2];
                 let mut cbstrip = vec![0f32; cpw * 8];
                 let mut crstrip = vec![0f32; cpw * 8];
                 let mut px = [0f32; 64];
-                for (k, e) in energy.iter_mut().enumerate() {
+                for k in 0..energy.len() {
+                    if carry && k > 0 {
+                        energy[k] = energy[k - 1];
+                    }
+                    let e = &mut energy[k];
                     let my = first + k;
                     for r in 0..8 * v2 {
                         let sy = (my * 8 * v2 + r).min(h - 1);
@@ -800,11 +835,10 @@ impl Encoder {
                     }
                 }
             };
-            {
+            let mut run = |workers: usize, row_energy: &mut [(f64, f64)]| {
                 let [cy, ccb, ccr] = comps.as_mut_slice() else {
                     unreachable!("RGB encodes three components")
                 };
-                let workers = parallel::threads(self.threads).min(mcu_h).max(1);
                 let band = mcu_h.div_ceil(workers);
                 let bands = cy
                     .blocks
@@ -833,16 +867,32 @@ impl Encoder {
                             },
                         )
                     });
-                parallel::for_each(bands, |(first, out)| encode_rows(first, out));
-            }
+                parallel::for_each(bands, |(first, out)| encode_rows(first, out, band == mcu_h));
+            };
+            let blocks = (luma_row + 2 * chroma_row) * mcu_h;
+            let workers = parallel::threads(self.threads, blocks).min(mcu_h);
+            run(workers, &mut row_energy);
             if track_energy {
-                let (mut e_low, mut e_all) = (0f64, 0f64);
-                for (l, a) in &row_energy {
-                    e_low += l;
-                    e_all += a;
+                // The margin is far above what the order of a sum of this
+                // many terms can change (about 1e-6 at the largest frame).
+                const MARGIN: f64 = 1e-4;
+                let mut total = row_energy[mcu_h - 1];
+                if workers > 1 {
+                    total = (0f64, 0f64);
+                    for (l, a) in &row_energy {
+                        total.0 += l;
+                        total.1 += a;
+                    }
+                    let ratio = gradient_ratio(total.0, total.1);
+                    if (ratio - GRADIENT_RATIO).abs() < MARGIN || force_one_band() {
+                        row_energy.fill((0.0, 0.0));
+                        run(1, &mut row_energy);
+                        total = row_energy[mcu_h - 1];
+                    }
                 }
-                comps[0].e_low = e_low;
-                comps[0].e_all = e_all;
+                (comps[0].e_low, comps[0].e_all) = total;
+                #[cfg(test)]
+                LAST_ENERGY.with(|e| e.set(total));
             }
             comps
         };
@@ -1255,6 +1305,48 @@ mod meta_tests {
 mod parallel_tests {
     use super::*;
 
+    /// The gradient energy is one running sum over the luma blocks in
+    /// order, term by term, whatever the number of bands: here against
+    /// that sum made block by block the plain way.
+    #[test]
+    fn gradient_energy_is_the_running_sum_over_blocks() {
+        let (w, h) = (320u32, 256u32); // whole blocks, enough for 3 workers
+        let rgb = image(w, h);
+        let mut plain = Component::with_grid(40, 40, 32, 1, 1, 0, 40 * 32);
+        plain.energy = true;
+        for by in 0..32 {
+            for bx in 0..40 {
+                let mut px = [0f32; 64];
+                for (i, v) in px.iter_mut().enumerate() {
+                    let p = &rgb[((by * 8 + i / 8) * w as usize + bx * 8 + i % 8) * 3..][..3];
+                    let (r, g, b) = (p[0] as f32, p[1] as f32, p[2] as f32);
+                    *v = 0.299 * r + 0.587 * g + 0.114 * b - 128.0;
+                }
+                plain.push_block(&mut px, &[1.0; 64]);
+            }
+        }
+        let want = (plain.e_low.to_bits(), plain.e_all.to_bits());
+        assert!(plain.e_all > 0.0);
+        let energy = |threads: usize, one_band: bool| {
+            LAST_ENERGY.with(|e| e.set((0.0, 0.0)));
+            FORCE_ONE_BAND.with(|f| f.set(one_band));
+            Encoder::new(90)
+                .sampling(Sampling::S444)
+                .deringing(false)
+                .threads(threads)
+                .encode_rgb(&rgb, w, h);
+            FORCE_ONE_BAND.with(|f| f.set(false));
+            let (low, all) = LAST_ENERGY.with(|e| e.get());
+            (low.to_bits(), all.to_bits())
+        };
+        assert_eq!(energy(1, false), want, "one band");
+        assert_eq!(energy(3, true), want, "one band after several");
+        // Several bands may round differently, but not by more than that.
+        let (low, all) = energy(3, false);
+        let near = |a: u64, b: u64| (f64::from_bits(a) / f64::from_bits(b) - 1.0).abs() < 1e-9;
+        assert!(near(low, want.0) && near(all, want.1));
+    }
+
     /// Gradient + xorshift noise with flat panels, at odd sizes so MCU
     /// padding and uneven bands are exercised.
     fn image(w: u32, h: u32) -> Vec<u8> {
@@ -1282,7 +1374,8 @@ mod parallel_tests {
 
     #[test]
     fn output_is_identical_for_every_thread_count() {
-        for (w, h) in [(333u32, 251u32), (17, 9), (8, 300), (640, 16)] {
+        // The largest has work for many workers; small images use few.
+        for (w, h) in [(1031u32, 701u32), (333, 251), (17, 9), (8, 300), (640, 16)] {
             let rgb = image(w, h);
             for sampling in [Sampling::S420, Sampling::S444] {
                 for progressive in [true, false] {
@@ -1296,12 +1389,17 @@ mod parallel_tests {
                         };
                         let one = enc(1);
                         assert!(decode_jpeg(&one).is_some(), "{w}x{h} undecodable");
-                        for t in [2, 3, 8, 0] {
+                        for t in [2, 3, 8, 0, usize::MAX] {
                             assert!(
                                 one == enc(t),
                                 "{w}x{h} {sampling:?} progressive={progressive} q{quality} differs at {t} threads"
                             );
                         }
+                        // The second pass an energy at the threshold takes.
+                        FORCE_ONE_BAND.with(|f| f.set(true));
+                        let again = enc(3);
+                        FORCE_ONE_BAND.with(|f| f.set(false));
+                        assert!(one == again, "{w}x{h} differs after the one-band pass");
                     }
                 }
             }
