@@ -24,8 +24,14 @@ jobs:
         run: cargo clippy --release --all-targets -- -D warnings
       - name: Tests
         run: cargo test --release
+      - name: Clippy (jxl feature)
+        run: cargo clippy --release --all-targets --features jxl -- -D warnings
+      - name: Tests (jxl feature)
+        run: cargo test --release --features jxl
       - name: wasm build
         run: cargo build --release --target wasm32-unknown-unknown
+      - name: wasm build (jxl feature)
+        run: cargo build --release --target wasm32-unknown-unknown --features jxl
       - name: wasm build (parallel feature must fail)
         run: |
           if cargo build --release --target wasm32-unknown-unknown --features parallel 2>/dev/null; then
@@ -33,6 +39,10 @@ jobs:
           fi
       - name: Docs
         run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Docs (jxl feature)
+        run: cargo doc --no-deps --features jxl
         env:
           RUSTDOCFLAGS: -D warnings
       - name: Package check
@@ -77,3 +87,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build at the declared MSRV
         run: cargo build --release
+      - name: Build at the declared MSRV (jxl feature)
+        run: cargo build --release --features jxl

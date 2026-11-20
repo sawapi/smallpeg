@@ -1,4 +1,6 @@
-//! JPEG to JPEG XL recompression (prototype).
+//! JPEG to JPEG XL recompression. Experimental: behind the `jxl`
+//! feature, and outside the crate's compatibility promise until it
+//! settles; the functions and their output may change in any release.
 //!
 //! The JPEG's quantized DCT coefficients are stored as they are in a
 //! JPEG XL VarDCT frame (8x8 DCT blocks, the JPEG's own quantization
@@ -15,11 +17,15 @@ use crate::quant::ZIGZAG;
 /// changing its coefficients. `None` for files this cannot carry over
 /// (grayscale, CMYK, RGB-coded JPEGs, sampling factors other than 1 and 2,
 /// a zero in a quantization table).
+///
+/// Experimental (the `jxl` feature): this function and its output may
+/// change in any release. The original JPEG file cannot be rebuilt from
+/// the result.
 pub fn jpeg_to_jxl(data: &[u8]) -> Option<Vec<u8>> {
     jpeg_to_jxl_with(data, &Limits::default())
 }
 
-/// [`jpeg_to_jxl`] with explicit limits.
+/// [`jpeg_to_jxl`] with explicit limits. Experimental in the same way.
 pub fn jpeg_to_jxl_with(data: &[u8], limits: &Limits) -> Option<Vec<u8>> {
     let p = parse_and_decode(data, false, limits)?;
     let f = Frame::new(&p)?;

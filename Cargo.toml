@@ -28,7 +28,7 @@ include = [
 # Multithreaded trellis (std::thread only, still zero dependencies).
 # Not available on wasm32-unknown-unknown; leave off there.
 parallel = []
-# JPEG to JPEG XL recompression (prototype).
+# JPEG to JPEG XL recompression. Experimental: may change in any release.
 jxl = []
 
 [[example]]
