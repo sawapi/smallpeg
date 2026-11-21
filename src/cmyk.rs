@@ -403,6 +403,7 @@ impl Encoder {
             self.deadzone,
             self.aq_lite,
             false,
+            self.threads,
         )
     }
 }

@@ -4,7 +4,7 @@ use crate::component::Component;
 use crate::huffman::{BitWriter, HuffTable, build_huff_table, emit_dht};
 use crate::symbols::{
     SparseAc, ac_band_stats_multi, for_each_ac_band_symbol_sparse,
-    for_each_ac_refine_symbol_sparse, for_each_dc_symbol, sparse_ac,
+    for_each_ac_refine_symbol_sparse, for_each_dc_symbol, sparse_ac_par,
 };
 
 /// Each Huffman-coded scan carries the symbol statistics the scan search
@@ -43,13 +43,16 @@ pub(crate) fn encode_progressive_scans(
     comps: &[Component],
     order: &[(usize, usize)],
     mut out: Vec<u8>,
+    threads: usize,
 ) -> Vec<u8> {
     use ScanSpec::*;
+    let blocks = comps.iter().map(|c| c.blocks.len()).sum();
+    let threads = crate::parallel::threads(threads, blocks);
 
     // Sparse (CSR) views of the AC coefficients: the scan search and the
     // AC scan emission only ever touch nonzero coefficients, which is what
     // makes the progressive stage cheap (byte-identical to the dense path).
-    let sparse: Vec<SparseAc> = comps.iter().map(sparse_ac).collect();
+    let sparse: Vec<SparseAc> = comps.iter().map(|c| sparse_ac_par(c, threads)).collect();
 
     // ---- Scan-script optimization: measure the exact coded size of every
     // candidate (statistics pass + optimal table), pick the cheapest. This
@@ -83,13 +86,6 @@ pub(crate) fn encode_progressive_scans(
         bits += al as u64 * (order.len() as u64 + 12 * 8); // refinement scans
         (bits, freqs)
     };
-    let (dc0, dc1) = (dc_cost(0), dc_cost(1));
-    let (dc_al, dc_freqs) = if dc1.0 < dc0.0 {
-        (1u8, dc1.1)
-    } else {
-        (0, dc0.1)
-    };
-
     // AC per component: band split {no, yes} x point transform {0, 1, 2}.
     // Refinement cost per level is independent of the chain's top, so it
     // is measured once per level.
@@ -105,6 +101,69 @@ pub(crate) fn encode_progressive_scans(
         (table_bits(&freq, payload), freq)
     };
 
+    // All the costs below are independent, so they run as parallel tasks
+    // (luma first, as it is the largest). One walk over a component's
+    // coefficients can price several bands, so bands are priced in groups:
+    // a few with workers to share them, and all in one walk without.
+    const SPLITS: [usize; 3] = [2, 5, 8];
+    let band_groups = if threads > 1 { 3 } else { 1 };
+    let mut bands = vec![(1usize, 63usize)];
+    for sp in SPLITS {
+        bands.extend([(1, sp), (sp + 1, 63)]);
+    }
+    let groups: Vec<&[(usize, usize)]> = bands.chunks(bands.len().div_ceil(band_groups)).collect();
+    enum Task<'a> {
+        Bands(usize, &'a [(usize, usize)]),
+        Refine(usize, u8),
+        Dc(u8),
+    }
+    #[allow(clippy::large_enum_variant)] // a few dozen short-lived values
+    enum Cost {
+        Bands(Vec<[([u32; 256], u64); 3]>),
+        Refine((u64, [u32; 256])),
+        Dc((u64, Vec<[u32; 256]>)),
+    }
+    let mut tasks = Vec::new();
+    for ci in 0..comps.len() {
+        tasks.extend(groups.iter().map(|g| Task::Bands(ci, g)));
+        tasks.extend([Task::Refine(ci, 0), Task::Refine(ci, 1)]);
+    }
+    tasks.extend([Task::Dc(0), Task::Dc(1)]);
+    let mut costs = crate::parallel::map(threads, &tasks, |task| match *task {
+        Task::Bands(ci, bands) => Cost::Bands(ac_band_stats_multi(&sparse[ci], bands)),
+        Task::Refine(ci, al) => Cost::Refine(ac_refine_cost(ci, al)),
+        Task::Dc(al) => Cost::Dc(dc_cost(al)),
+    })
+    .into_iter();
+    let mut band_stats = Vec::with_capacity(comps.len());
+    let mut refine_costs = Vec::with_capacity(comps.len());
+    for _ in 0..comps.len() {
+        let mut stats = Vec::with_capacity(bands.len());
+        for _ in 0..groups.len() {
+            match costs.next() {
+                Some(Cost::Bands(s)) => stats.extend(s),
+                _ => unreachable!("tasks are listed per component"),
+            }
+        }
+        let mut refine = || match costs.next() {
+            Some(Cost::Refine(r)) => r,
+            _ => unreachable!("tasks are listed per component"),
+        };
+        let (r0, r1) = (refine(), refine());
+        band_stats.push(stats);
+        refine_costs.push((r0, r1));
+    }
+    let mut dc = || match costs.next() {
+        Some(Cost::Dc(d)) => d,
+        _ => unreachable!("DC tasks are listed last"),
+    };
+    let (dc0, dc1) = (dc(), dc());
+    let (dc_al, dc_freqs) = if dc1.0 < dc0.0 {
+        (1u8, dc1.1)
+    } else {
+        (0, dc0.1)
+    };
+
     let mut scans: Vec<ScanSpec> = vec![DcFirst {
         al: dc_al,
         freqs: dc_freqs,
@@ -112,7 +171,7 @@ pub(crate) fn encode_progressive_scans(
     let mut refine_freqs: Vec<[[u32; 256]; 2]> = Vec::with_capacity(comps.len());
     let mut chain_al = vec![0u8; comps.len()];
     for ci in 0..comps.len() {
-        let (r0, r1) = (ac_refine_cost(ci, 0), ac_refine_cost(ci, 1));
+        let (r0, r1) = refine_costs[ci];
         let refine: [u64; 2] = [r0.0, r1.0];
         refine_freqs.push([r0.1, r1.1]);
         // Candidates: no split, or split the band at sp (low 1..=sp, high
@@ -120,13 +179,10 @@ pub(crate) fn encode_progressive_scans(
         // wants a tiny dense low band (1..=2) so the high band is almost
         // all EOB runs.
         let mut best = (u64::MAX, None::<usize>, 0u8);
-        // One sparse pass per band covers all three point transforms.
-        const SPLITS: [usize; 3] = [2, 5, 8];
-        let mut bands = vec![(1usize, 63usize)];
-        for sp in SPLITS {
-            bands.extend([(1, sp), (sp + 1, 63)]);
-        }
-        let mut stats = ac_band_stats_multi(&sparse[ci], &bands).into_iter();
+        // One walk per band covers all three point transforms. Stats come
+        // in the order of `bands`: (1, 63), then (1, sp) and (sp + 1, 63)
+        // for each split.
+        let mut stats = std::mem::take(&mut band_stats[ci]).into_iter();
         let full_s = stats.next().unwrap();
         let split_s: Vec<_> = SPLITS
             .iter()
@@ -208,9 +264,12 @@ pub(crate) fn encode_progressive_scans(
         out.extend_from_slice(&[0x00, 0x00, (ah << 4) | al]);
     };
 
-    for spec in scans {
-        match spec {
-            DcFirst { al, freqs } => {
+    // Every scan is a self-contained segment (DHT, SOS, byte-aligned entropy
+    // data), so with workers they are written independently and then
+    // concatenated; without, each is appended to the output directly.
+    let write_scan = |spec: &ScanSpec, mut out: Vec<u8>| {
+        match *spec {
+            DcFirst { al, ref freqs } => {
                 let tables: Vec<HuffTable> = freqs.iter().map(build_huff_table).collect();
                 for (dest, t) in tables.iter().enumerate() {
                     emit_dht(&mut out, 0, dest as u8, t);
@@ -240,9 +299,9 @@ pub(crate) fn encode_progressive_scans(
                 ss,
                 se,
                 al,
-                freq,
+                ref freq,
             } => {
-                let t = build_huff_table(&freq);
+                let t = build_huff_table(freq);
                 emit_dht(&mut out, 1, 0, &t);
                 out.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 1, ci as u8 + 1, 0x00]);
                 out.extend_from_slice(&[ss as u8, se as u8, al]);
@@ -260,9 +319,9 @@ pub(crate) fn encode_progressive_scans(
                 ss,
                 se,
                 al,
-                freq,
+                ref freq,
             } => {
-                let t = build_huff_table(&freq);
+                let t = build_huff_table(freq);
                 emit_dht(&mut out, 1, 0, &t);
                 out.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 1, ci as u8 + 1, 0x00]);
                 out.extend_from_slice(&[ss as u8, se as u8, ((al + 1) << 4) | al]);
@@ -277,6 +336,16 @@ pub(crate) fn encode_progressive_scans(
                 writer.flush();
                 out = writer.out;
             }
+        }
+        out
+    };
+    if threads > 1 {
+        for segment in crate::parallel::map(threads, &scans, |spec| write_scan(spec, Vec::new())) {
+            out.extend_from_slice(&segment);
+        }
+    } else {
+        for spec in &scans {
+            out = write_scan(spec, out);
         }
     }
 

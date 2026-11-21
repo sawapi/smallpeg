@@ -5,7 +5,7 @@ use crate::component::Component;
 use crate::huffman::{BitWriter, HuffTable, build_huff_table, emit_dht};
 use crate::progressive::encode_progressive_scans;
 use crate::quant::ZIGZAG;
-use crate::symbols::{category, for_each_symbol};
+use crate::symbols::{category, for_each_symbol, symbol_stats};
 use crate::trellis::{estimate_bits, trellis_ac};
 
 #[allow(clippy::too_many_arguments)]
@@ -24,7 +24,10 @@ pub(crate) fn encode_document(
     deadzone: (f32, f32),
     aq_lite: (f32, f32, f32, f32),
     jfif: bool,
+    threads: usize,
 ) -> Vec<u8> {
+    let blocks = comps.iter().map(|c| c.blocks.len()).sum();
+    let threads = crate::parallel::threads(threads, blocks);
     // Trellis distortion weights per quant table (zigzag order); gamma 0
     // leaves every weight at exactly 1.0, i.e. plain step units.
     let freq_wts: Vec<[f32; 64]> = qts
@@ -42,10 +45,7 @@ pub(crate) fn encode_document(
         .collect();
     // Pass 1: symbol statistics from plain rounding.
     let n_tables = comps.iter().map(|c| c.table_class).max().unwrap_or(0) * 2 + 2;
-    let mut freqs = vec![[0u32; 256]; n_tables];
-    for_each_symbol(&comps, order, |tbl, sym, _n, _bits| {
-        freqs[tbl][sym as usize] += 1;
-    });
+    let (freqs, _) = symbol_stats(&comps, order, n_tables, threads);
 
     // Trellis pass: re-decide every AC coefficient against rate estimates
     // derived from pass 1, then redo the statistics for the final tables.
@@ -147,46 +147,25 @@ pub(crate) fn encode_document(
                     1.0
                 };
             let m = &mults[ci];
-            #[cfg(feature = "parallel")]
-            {
-                // Blocks are independent, so chunked scoped threads produce
-                // byte-identical output in any interleaving.
-                let nthreads = std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(1)
-                    .min(8);
-                let n = c.blocks.len();
-                let chunk = n.div_ceil(nthreads.max(1));
-                let raw = &c.raw;
-                std::thread::scope(|sc| {
-                    for (t, (bch, rch)) in c
-                        .blocks
-                        .chunks_mut(chunk)
-                        .zip(raw.chunks(chunk))
-                        .enumerate()
-                    {
-                        let base = t * chunk;
-                        let aqm = &aq_mults[ci];
-                        sc.spawn(move || {
-                            for (i, (blk, rw)) in bch.iter_mut().zip(rch).enumerate() {
-                                let mut lb = if m.is_empty() { lam } else { lam * m[base + i] };
-                                if !aqm.is_empty() {
-                                    lb *= aqm[base + i];
-                                }
-                                trellis_ac(rw, blk, bits, lb, wt);
-                            }
-                        });
+            // Blocks are independent, so chunks of them on separate threads
+            // produce byte-identical output in any interleaving.
+            let chunk = c.blocks.len().div_ceil(threads).max(1);
+            let (raw, aqm) = (&c.raw, &aq_mults[ci]);
+            let chunks = c
+                .blocks
+                .chunks_mut(chunk)
+                .zip(raw.chunks(chunk))
+                .enumerate();
+            crate::parallel::for_each(chunks, |(t, (bch, rch))| {
+                let base = t * chunk;
+                for (i, (blk, rw)) in bch.iter_mut().zip(rch).enumerate() {
+                    let mut lb = if m.is_empty() { lam } else { lam * m[base + i] };
+                    if !aqm.is_empty() {
+                        lb *= aqm[base + i];
                     }
-                });
-            }
-            #[cfg(not(feature = "parallel"))]
-            for (bi, (blk, raw)) in c.blocks.iter_mut().zip(&c.raw).enumerate() {
-                let mut lb = if m.is_empty() { lam } else { lam * m[bi] };
-                if !aq_mults[ci].is_empty() {
-                    lb *= aq_mults[ci][bi];
+                    trellis_ac(rw, blk, bits, lb, wt);
                 }
-                trellis_ac(raw, blk, bits, lb, wt);
-            }
+            });
         }
     };
 
@@ -253,7 +232,10 @@ pub(crate) fn encode_document(
         let dc_bits: Vec<[f32; 256]> = (0..n_tables / 2)
             .map(|tc| estimate_bits(&freqs[tc * 2]))
             .collect();
-        for ci in 0..comps.len() {
+        // Chains are per component and independent: solve them in parallel,
+        // then write the chosen DC values back.
+        let components: Vec<usize> = (0..comps.len()).collect();
+        let chosen = crate::parallel::map(threads, &components, |&ci| {
             let lam = lambda
                 * if comps[ci].table_class == 1 {
                     chroma_lambda_scale
@@ -302,11 +284,18 @@ pub(crate) fn encode_document(
                 cost = next;
             }
             let mut k = (0..3).min_by(|&a, &b| cost[a].total_cmp(&cost[b])).unwrap();
+            let mut dc = vec![0i16; chain.len()];
             for j in (0..chain.len()).rev() {
-                comps[ci].blocks[chain[j]][0] = cand(j, k) as i16;
+                dc[j] = cand(j, k) as i16;
                 if j > 0 {
                     k = back[j][k] as usize;
                 }
+            }
+            (chain, dc)
+        });
+        for (ci, (chain, dc)) in chosen.into_iter().enumerate() {
+            for (bi, v) in chain.into_iter().zip(dc) {
+                comps[ci].blocks[bi][0] = v;
             }
         }
     }
@@ -357,12 +346,7 @@ pub(crate) fn encode_document(
     // bit count, so the scan data is only written when it can still win.
     let mut base_head = head.clone();
     emit_sof(&mut base_head, 0xC0);
-    let mut freqs = vec![[0u32; 256]; n_tables];
-    let mut payload = 0u64;
-    for_each_symbol(&comps, order, |tbl, sym, n, _bits| {
-        freqs[tbl][sym as usize] += 1;
-        payload += n as u64;
-    });
+    let (freqs, payload) = symbol_stats(&comps, order, n_tables, threads);
     let tables: Vec<HuffTable> = freqs.iter().map(build_huff_table).collect();
     for (id, t) in tables.iter().enumerate() {
         emit_dht(&mut base_head, (id & 1) as u8, (id / 2) as u8, t);
@@ -415,7 +399,7 @@ pub(crate) fn encode_document(
     // streams and keeping the smaller one is cheap scan optimization.
     let mut prog_head = head;
     emit_sof(&mut prog_head, 0xC2);
-    let prog = encode_progressive_scans(&comps, order, prog_head);
+    let prog = encode_progressive_scans(&comps, order, prog_head, threads);
     if prog.len() <= baseline_min_len {
         return prog;
     }
