@@ -24,3 +24,12 @@ a published technique that mozjpeg brought into everyday JPEG encoding.
 No mozjpeg code is used: smallpeg's dynamic program, its rate model and
 its parameters are its own, implemented from the standard
 rate-distortion formulation.
+
+## JPEG XL recompression (from the standard)
+
+The `jxl` feature is written from the JPEG XL standard (ISO/IEC 18181).
+Its fixed tables are the standard's own values: the contexts of the
+coefficient coding, the prediction of the color profile's header, and
+the natural order of the coefficients. The choices an encoder is free to
+make (the tree for the DC image, the block contexts, the coefficient
+orders) are computed from each image by smallpeg's own methods.

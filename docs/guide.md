@@ -135,8 +135,9 @@ The optional `parallel` feature spreads encoding across cores with
 quantization, and the progressive scan search and output. `Encoder::threads`
 sets the number of threads (by default the available cores, up to 8; at
 most 64). Small images use fewer, where threads would not pay off. The
-output is byte-identical for any thread count. It is not available on
-`wasm32-unknown-unknown`.
+output is byte-identical for any thread count. `optimize_jpeg` and
+`upright_jpeg` use threads too where they write progressive output, with
+the default number. It is not available on `wasm32-unknown-unknown`.
 
 ```toml
 smallpeg = { version = "0.15", features = ["parallel"] }
