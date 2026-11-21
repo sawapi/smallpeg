@@ -1,7 +1,7 @@
 //! The reconstruction data as the bytes of a `jbrd` box.
 
 use super::{App, Recon};
-use crate::jxl::Bits;
+use crate::jxl::bits::Bits;
 use crate::optimize::Parsed;
 
 /// Distributions of the box's variable-length numbers: (offset, bits).
