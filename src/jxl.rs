@@ -6,40 +6,97 @@
 //! JPEG XL VarDCT frame (8x8 DCT blocks, the JPEG's own quantization
 //! tables, YCbCr and the JPEG's chroma subsampling), so the image decodes
 //! to what the JPEG holds, with no generation loss. Only the entropy
-//! coding changes.
+//! coding changes. Reconstruction data (`recon`) lets a decoder write the
+//! JPEG file itself back.
 //!
 //! Written from the JPEG XL format (ISO/IEC 18181-1).
 
 use crate::optimize::{Limits, Parsed, parse_and_decode};
 use crate::quant::ZIGZAG;
 
+mod recon;
+
 /// Recompress a baseline or progressive YCbCr JPEG as JPEG XL without
 /// changing its coefficients. `None` for files this cannot carry over
 /// (grayscale, CMYK, RGB-coded JPEGs, sampling factors other than 1 and 2,
 /// a zero in a quantization table).
 ///
+/// The result also holds what a JPEG XL decoder needs to write the
+/// original file back, byte for byte, whenever the format can describe
+/// the file (a few it cannot, such as one that changes its restart
+/// interval between scans; the image is carried over all the same).
+/// That adds a few hundred bytes; [`JxlOptions::reconstruction`] turns it
+/// off.
+///
 /// Experimental (the `jxl` feature): this function and its output may
-/// change in any release. The original JPEG file cannot be rebuilt from
-/// the result.
+/// change in any release.
 pub fn jpeg_to_jxl(data: &[u8]) -> Option<Vec<u8>> {
-    jpeg_to_jxl_with(data, &Limits::default())
+    jpeg_to_jxl_with(data, &JxlOptions::default())
 }
 
-/// [`jpeg_to_jxl`] with explicit limits. Experimental in the same way.
-pub fn jpeg_to_jxl_with(data: &[u8], limits: &Limits) -> Option<Vec<u8>> {
-    let p = parse_and_decode(data, false, limits)?;
+/// Options for [`jpeg_to_jxl_with`]. Experimental like the functions.
+///
+/// ```
+/// // Leave out what rebuilds the JPEG file, for the smallest output:
+/// let options = smallpeg::JxlOptions::default().reconstruction(false);
+/// # assert!(!options.reconstruction);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct JxlOptions {
+    /// Limits on the JPEG that is read.
+    pub limits: Limits,
+    /// Include what a decoder needs to write the original JPEG file back
+    /// byte for byte (a few hundred bytes), when the format can describe
+    /// the file. Default true. Without it the image is the same, but the
+    /// file it came from is gone for good.
+    pub reconstruction: bool,
+}
+
+impl Default for JxlOptions {
+    fn default() -> Self {
+        JxlOptions {
+            limits: Limits::default(),
+            reconstruction: true,
+        }
+    }
+}
+
+impl JxlOptions {
+    /// Set [`limits`](JxlOptions::limits).
+    pub fn limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Set [`reconstruction`](JxlOptions::reconstruction).
+    pub fn reconstruction(mut self, on: bool) -> Self {
+        self.reconstruction = on;
+        self
+    }
+}
+
+/// [`jpeg_to_jxl`] with options. Experimental in the same way.
+pub fn jpeg_to_jxl_with(data: &[u8], options: &JxlOptions) -> Option<Vec<u8>> {
+    let p = parse_and_decode(data, false, &options.limits)?;
     let f = Frame::new(&p)?;
     let meta = Meta::read(data, &p);
     let codestream = f.encode(&meta);
-    Some(if meta.exif.is_none() && meta.xmp.is_none() {
-        codestream
-    } else {
-        container(&codestream, &meta)
-    })
+    let jbrd = (options.reconstruction)
+        .then(|| recon::data(data, &p, &meta))
+        .flatten();
+    Some(
+        if meta.exif.is_none() && meta.xmp.is_none() && jbrd.is_none() {
+            codestream
+        } else {
+            container(&codestream, &meta, jbrd.as_deref())
+        },
+    )
 }
 
 /// What carries over from the JPEG besides the image: the color profile
-/// and orientation (in the codestream), Exif and XMP (in boxes).
+/// and orientation (in the codestream), Exif and XMP (in boxes). The
+/// reconstruction data counts on finding them there as they are.
 struct Meta {
     icc: Option<Vec<u8>>,
     orientation: u8,
@@ -106,8 +163,9 @@ impl Meta {
     }
 }
 
-/// The codestream in the JPEG XL container, with Exif and XMP boxes.
-fn container(codestream: &[u8], meta: &Meta) -> Vec<u8> {
+/// The codestream in the JPEG XL container, with the reconstruction data
+/// and Exif and XMP boxes.
+fn container(codestream: &[u8], meta: &Meta, jbrd: Option<&[u8]>) -> Vec<u8> {
     let mut out = Vec::with_capacity(codestream.len() + 1024);
     let mut push_box = |kind: &[u8; 4], parts: &[&[u8]]| {
         let len: usize = 8 + parts.iter().map(|p| p.len()).sum::<usize>();
@@ -119,6 +177,9 @@ fn container(codestream: &[u8], meta: &Meta) -> Vec<u8> {
     };
     push_box(b"JXL ", &[&[0x0D, 0x0A, 0x87, 0x0A]]);
     push_box(b"ftyp", &[b"jxl ", &[0, 0, 0, 0], b"jxl "]);
+    if let Some(j) = jbrd {
+        push_box(b"jbrd", &[j]);
+    }
     if let Some(e) = &meta.exif {
         push_box(b"Exif", &[&[0, 0, 0, 0], e]); // offset of the TIFF header: 0
     }

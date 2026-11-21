@@ -135,7 +135,7 @@ mod upright;
 pub use cmyk::{AdobeTransform, CmykImage, decode_cmyk, decode_cmyk_with};
 pub use decode::{DecodedImage, decode_jpeg, decode_jpeg_with};
 #[cfg(feature = "jxl")]
-pub use jxl::{jpeg_to_jxl, jpeg_to_jxl_with};
+pub use jxl::{JxlOptions, jpeg_to_jxl, jpeg_to_jxl_with};
 pub use meta::{apply_orientation, strip_metadata};
 pub use optimize::{
     JpegInfo, Limits, jpeg_info, optimize_jpeg, optimize_jpeg_baseline,
