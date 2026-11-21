@@ -140,5 +140,5 @@ output is byte-identical for any thread count. `optimize_jpeg` and
 the default number. It is not available on `wasm32-unknown-unknown`.
 
 ```toml
-smallpeg = { version = "0.15", features = ["parallel"] }
+smallpeg = { version = "0.16", features = ["parallel"] }
 ```

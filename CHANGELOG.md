@@ -5,6 +5,38 @@ entries before it record development that preceded publication.
 
 ## Unreleased
 
+## 0.16.0
+
+New: `Encoder::threads`, more of the encoder on worker threads with the
+`parallel` feature, and an experimental `jxl` feature (JPEG to JPEG XL).
+The encoder's and the re-coding functions' output is unchanged, with any
+features and any number of threads. The npm package is not released at
+this version: nothing in it changed, and it stays at 0.15.0.
+
+- `parallel` feature: color conversion and the DCT, the symbol
+  statistics, the DC trellis and the progressive scan search and output
+  now run on worker threads, as trellis quantization already did. A
+  2048x1536 photo on 12 cores: progressive 42 ms to 20 ms, baseline
+  25 ms to 14 ms. The output is byte-identical for any number of
+  threads. `optimize_jpeg` and `upright_jpeg` use the threads too where
+  they write progressive output, with the default number of them. Small
+  images use fewer workers, one per 1024 blocks, so the smallest stay on
+  the calling thread. (Contributed by Vulptik, #22.)
+- `Encoder::threads(n)` sets the number of worker threads for the
+  `parallel` feature: 0, the default, uses the available cores up to 8;
+  counts above 64 are taken as 64. Without the feature everything runs
+  on the calling thread, as before.
+- Experimental `jxl` feature: `jpeg_to_jxl` recompresses a JPEG, color or
+  grayscale, as JPEG XL without changing its coefficients, so the image
+  is the same and a photo's file about 10% smaller (less for very small
+  files). The output also holds what a JPEG XL decoder needs to write
+  the original JPEG file back byte for byte, whenever the format can
+  describe the file; `JxlOptions::reconstruction(false)` leaves that out
+  (a few hundred bytes for most files). The color profile, Exif and XMP
+  carry over. CMYK and RGB-coded JPEGs are not converted. It takes about
+  20 to 50 bytes of memory per pixel. The feature is outside the
+  compatibility promise: its functions and output may change in any
+  release. It is not in the npm package.
 - Website: photos with colors outside sRGB, such as Display P3 photos
   from an iPhone, keep those colors when re-encoded. They were read
   through an sRGB canvas, which dulled the most saturated colors; they
