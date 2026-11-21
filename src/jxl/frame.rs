@@ -178,18 +178,31 @@ fn nonzero_context(predicted: usize, block_ctx: u32, num_ctx: u32) -> u32 {
 struct Chan<'a> {
     hs: usize,
     vs: usize,
-    /// Blocks of the JPEG component, row stride `bw`, zigzag order.
-    pub(super) blocks: &'a [[i16; 64]],
-    pub(super) bw: usize,
+    /// Blocks of the JPEG component, row stride `bw`, zigzag order; none
+    /// for the chroma of a grayscale image, which is all zeros.
+    blocks: Option<&'a [[i16; 64]]>,
+    bw: usize,
     /// Quantization table in natural order.
     q: [u16; 64],
+}
+
+impl Chan<'_> {
+    fn blk(&self, i: usize) -> &[i16; 64] {
+        const ZERO: [i16; 64] = [0; 64];
+        match self.blocks {
+            Some(b) => &b[i],
+            None => &ZERO,
+        }
+    }
 }
 
 pub(super) struct Frame<'a> {
     pub(super) width: usize,
     pub(super) height: usize,
-    /// Channels in JPEG XL order: Cb, Y, Cr.
+    /// Channels in JPEG XL order: Cb, Y, Cr. A grayscale image is its
+    /// one component as Y, with empty chroma of the same shape.
     ch: [Chan<'a>; 3],
+    gray: bool,
     up: [u32; 3],
     xblocks: usize,
     yblocks: usize,
@@ -197,11 +210,14 @@ pub(super) struct Frame<'a> {
 
 impl<'a> Frame<'a> {
     pub(super) fn new(p: &'a Parsed) -> Option<Self> {
-        if p.comps.len() != 3 || p.adobe == Some(0) {
-            return None;
-        }
-        if !p.jfif && p.adobe.is_none() && p.ids == *b"RGB" {
-            return None;
+        let gray = p.comps.len() == 1;
+        if !gray {
+            if p.comps.len() != 3 || p.adobe == Some(0) {
+                return None;
+            }
+            if !p.jfif && p.adobe.is_none() && p.ids == *b"RGB" {
+                return None;
+            }
         }
         let mode = |h: usize, v: usize| match (h, v) {
             (1, 1) => Some(0u32),
@@ -212,7 +228,7 @@ impl<'a> Frame<'a> {
         };
         const HS: [usize; 4] = [0, 1, 1, 0];
         const VS: [usize; 4] = [0, 1, 0, 1];
-        let jpeg_of = [1usize, 0, 2];
+        let jpeg_of = if gray { [0usize; 3] } else { [1, 0, 2] };
         let mut up = [0u32; 3];
         for c in 0..3 {
             let j = &p.comps[jpeg_of[c]];
@@ -244,7 +260,7 @@ impl<'a> Frame<'a> {
             chans.push(Chan {
                 hs,
                 vs,
-                blocks: &j.blocks,
+                blocks: (!gray || c == 1).then_some(&j.blocks[..]),
                 bw: j.bw,
                 q,
             });
@@ -254,6 +270,7 @@ impl<'a> Frame<'a> {
             width,
             height,
             ch,
+            gray,
             up,
             xblocks,
             yblocks,
@@ -293,7 +310,7 @@ impl<'a> Frame<'a> {
                 let mut v = Vec::with_capacity(w * h);
                 for y in 0..h {
                     for x in 0..w {
-                        v.push(ch.blocks[(y0 + y) * ch.bw + x0 + x][0] as i32);
+                        v.push(ch.blk((y0 + y) * ch.bw + x0 + x)[0] as i32);
                     }
                 }
                 planes.push((v, w, h));
@@ -383,7 +400,7 @@ impl<'a> Frame<'a> {
         let mut luma_dc = Vec::new();
         for y in 0..self.yblocks >> luma.vs {
             for x in 0..self.xblocks >> luma.hs {
-                luma_dc.push(luma.blocks[y * luma.bw + x][0]);
+                luma_dc.push(luma.blk(y * luma.bw + x)[0]);
             }
         }
         let fine = fine_thresholds(&luma_dc);
@@ -398,7 +415,7 @@ impl<'a> Frame<'a> {
             let mut zeros = [0u64; 64];
             for y in 0..self.yblocks >> ch.vs {
                 for x in 0..self.xblocks >> ch.hs {
-                    let blk = &ch.blocks[y * ch.bw + x];
+                    let blk = ch.blk(y * ch.bw + x);
                     for (pos, z) in zeros.iter_mut().enumerate() {
                         *z += (blk[to_zz[pos]] == 0) as u64;
                     }
@@ -442,11 +459,11 @@ impl<'a> Frame<'a> {
                         } else {
                             (nz[c][sbx] as usize + nz[c][sbx - 1] as usize).div_ceil(2)
                         };
-                        let blk = &ch.blocks[((oy >> ch.vs) + sby) * ch.bw + (ox >> ch.hs) + sbx];
+                        let blk = ch.blk(((oy >> ch.vs) + sby) * ch.bw + (ox >> ch.hs) + sbx);
                         let coef = |k: usize| blk[orders[c][k]] as i32;
                         let nonzeros = (1..64).filter(|&k| coef(k) != 0).count();
-                        let dc = luma.blocks
-                            [((oy + by) >> luma.vs) * luma.bw + ((ox + bx) >> luma.hs)][0];
+                        let dc =
+                            luma.blk(((oy + by) >> luma.vs) * luma.bw + ((ox + bx) >> luma.hs))[0];
                         let at = (c * 8 + fb.bucket(dc as i32)) as u8;
                         t.push((nonzero_context(predicted, 0, 1), nonzeros as u32));
                         wh.push(at);
@@ -620,7 +637,16 @@ impl<'a> Frame<'a> {
         if meta.icc.is_some() {
             w.bit(false); // color encoding not all default
             w.bit(true); // an ICC profile
-            w.put(2, 0); // RGB
+            w.put(2, self.gray as u64); // RGB or gray
+        } else if self.gray {
+            w.bit(false); // color encoding not all default
+            w.bit(false); // no ICC profile
+            w.put(2, 1); // gray
+            w.put(2, 1); // white point D65
+            w.bit(false); // no gamma: a named transfer function,
+            w.put(2, 2);
+            w.put(4, 13 - 2); // sRGB's
+            w.put(2, 1); // rendering intent: relative
         } else {
             w.bit(true); // sRGB
         }

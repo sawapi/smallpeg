@@ -133,7 +133,8 @@ fn be16(d: &[u8], at: usize) -> Option<usize> {
 
 /// Reads the file's structure, tracing its entropy-coded data.
 pub(super) fn parse<'a>(d: &'a [u8], p: &Parsed) -> Option<Recon<'a>> {
-    if !d.starts_with(&[0xFF, 0xD8]) || p.comps.len() != 3 || p.ids.len() != 3 {
+    let n = p.comps.len();
+    if !d.starts_with(&[0xFF, 0xD8]) || !(n == 1 || n == 3) || p.ids.len() != n {
         return None;
     }
     let mut r = Recon {
