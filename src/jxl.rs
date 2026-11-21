@@ -29,11 +29,15 @@ use frame::Frame;
 /// 1 and 2, a zero in a quantization table).
 ///
 /// The result also holds what a JPEG XL decoder needs to write the
-/// original file back, byte for byte, whenever the format can describe
-/// the file (a few it cannot, such as one that changes its restart
-/// interval between scans; the image is carried over all the same).
-/// That adds a few hundred bytes; [`JxlOptions::reconstruction`] turns it
-/// off.
+/// original file back, byte for byte: see
+/// [`JxlOptions::reconstruction`] for what that costs and when it is
+/// left out. The color profile, Exif and XMP carry over either way
+/// ([`strip_metadata`](crate::strip_metadata) first removes them).
+///
+/// It runs on one thread whatever the features, and takes about 20 to 50
+/// bytes of memory per pixel, more the finer the JPEG's quantization: a
+/// 24-megapixel photo needs about 400 MB. [`JxlOptions::limits`] bounds
+/// the frame it accepts.
 ///
 /// Experimental (the `jxl` feature): this function and its output may
 /// change in any release.
@@ -54,9 +58,20 @@ pub struct JxlOptions {
     /// Limits on the JPEG that is read.
     pub limits: Limits,
     /// Include what a decoder needs to write the original JPEG file back
-    /// byte for byte (a few hundred bytes), when the format can describe
-    /// the file. Default true. Without it the image is the same, but the
-    /// file it came from is gone for good.
+    /// byte for byte. Default true. Without it the image is the same, but
+    /// the file it came from is gone for good.
+    ///
+    /// For most files it is a few hundred bytes. It also holds, as they
+    /// are, the parts of the file that are neither image nor color
+    /// profile, Exif or XMP: other APP segments, comments, and data after
+    /// the end of the image, so a file with a large trailer grows by
+    /// about that much.
+    ///
+    /// It is left out, with no sign in the return value, when the format
+    /// cannot describe the file: one that changes its restart interval
+    /// between scans, for example, or has more than about 4 MB after the
+    /// end of the image. The image is carried over all the same. Output
+    /// with it is a JPEG XL container holding a `jbrd` box.
     pub reconstruction: bool,
 }
 

@@ -46,11 +46,11 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "smallpeg"
-version = "0.15.0"
+version = "0.16.0"
 
 [[package]]
 name = "smallpeg-wasm"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "smallpeg",
  "wasm-bindgen",

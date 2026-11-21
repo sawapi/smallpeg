@@ -1,6 +1,6 @@
 [package]
 name = "smallpeg"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 # 1.88 for let-chains and slice::as_chunks_mut (1.87 fails on both);
 # edition 2024 itself needs only 1.85. Verified by the msrv job in CI.
@@ -24,8 +24,12 @@ include = [
     "/LICENSE-APACHE",
 ]
 
+[package.metadata.docs.rs]
+# Show the experimental JPEG XL functions in the documentation.
+features = ["jxl"]
+
 [features]
-# Multithreaded trellis (std::thread only, still zero dependencies).
+# Multithreaded encoding (std::thread only, still zero dependencies).
 # Not available on wasm32-unknown-unknown; leave off there.
 parallel = []
 # JPEG to JPEG XL recompression. Experimental: may change in any release.

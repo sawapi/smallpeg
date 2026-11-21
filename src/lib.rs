@@ -659,6 +659,8 @@ impl Encoder {
             let recip_c = dequant_scale(qt_c);
             let der = self.make_dering(qt_l);
 
+            // No blocks reserved here: they are allocated in place below,
+            // whole, so that bands of rows can be written into them.
             let mut comps = vec![
                 Component::with_grid(
                     lbw,
@@ -667,26 +669,10 @@ impl Encoder {
                     h2 as u8,
                     v2 as u8,
                     0,
-                    lbw * mcu_h * v2,
+                    0,
                 ),
-                Component::with_grid(
-                    mcu_w,
-                    ceil_div(cw, 8),
-                    ceil_div(chh, 8),
-                    1,
-                    1,
-                    1,
-                    mcu_w * mcu_h,
-                ),
-                Component::with_grid(
-                    mcu_w,
-                    ceil_div(cw, 8),
-                    ceil_div(chh, 8),
-                    1,
-                    1,
-                    1,
-                    mcu_w * mcu_h,
-                ),
+                Component::with_grid(mcu_w, ceil_div(cw, 8), ceil_div(chh, 8), 1, 1, 1, 0),
+                Component::with_grid(mcu_w, ceil_div(cw, 8), ceil_div(chh, 8), 1, 1, 1, 0),
             ];
             comps[0].energy = tracks_gradient(self);
 
