@@ -15,7 +15,7 @@ const BLOCK_STEP: Dist = [(0, 0), (1, 3), (9, 5), (41, 28)];
 /// Brotli stream.
 pub(super) fn write(r: &Recon, p: &Parsed) -> Vec<u8> {
     let mut w = Bits::default();
-    w.bit(false); // not grayscale
+    w.bit(p.comps.len() == 1); // grayscale
     for &m in &r.markers {
         w.put(6, (m - 0xC0) as u64);
     }
@@ -33,11 +33,12 @@ pub(super) fn write(r: &Recon, p: &Parsed) -> Vec<u8> {
         w.bit(q.last);
     }
     match p.ids[..] {
+        [1] => w.put(2, 0),
         [1, 2, 3] => w.put(2, 1),
         [b'R', b'G', b'B'] => w.put(2, 2),
         _ => {
             w.put(2, 3);
-            w.u32(3, ONE_TO_FOUR);
+            w.u32(p.ids.len() as u32, ONE_TO_FOUR);
             for &id in &p.ids {
                 w.put(8, id as u64);
             }

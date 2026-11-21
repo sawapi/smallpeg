@@ -147,10 +147,11 @@ pub(super) fn rebuild(r: &Recon, p: &Parsed, out: &mut Out) -> bool {
         match m {
             0xC0..=0xC2 => {
                 progressive = m == 0xC2;
-                let mut s = vec![0xFF, m, 0, 17, 8];
+                let n = p.comps.len() as u8;
+                let mut s = vec![0xFF, m, 0, 8 + 3 * n, 8];
                 s.extend_from_slice(&p.height.to_be_bytes());
                 s.extend_from_slice(&p.width.to_be_bytes());
-                s.push(3);
+                s.push(n);
                 for (i, c) in p.comps.iter().enumerate() {
                     s.extend_from_slice(&[
                         p.ids[i],
@@ -208,7 +209,7 @@ pub(super) fn rebuild(r: &Recon, p: &Parsed, out: &mut Out) -> bool {
                     };
                     // The table a decoder has here: that of a component
                     // using it, or else the one before it again.
-                    let used = |j: usize| (0..3).find(|&c| r.comp_quant[c] == j);
+                    let used = |j: usize| r.comp_quant.iter().position(|&q| q == j);
                     let Some(c) = (0..=quant).rev().find_map(used) else {
                         return false;
                     };

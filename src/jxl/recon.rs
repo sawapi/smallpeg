@@ -291,6 +291,15 @@ mod tests {
                 v.push(e.encode_rgb(&rgb, w, h));
             }
         }
+        // Grayscale: the green of the same image.
+        let gray: Vec<u8> = rgb.chunks(3).map(|p| p[1]).collect();
+        for progressive in [false, true] {
+            v.push(
+                Encoder::new(85)
+                    .progressive(progressive)
+                    .encode_gray(&gray, w, h),
+            );
+        }
         v
     }
 

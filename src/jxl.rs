@@ -4,7 +4,8 @@
 //!
 //! The JPEG's quantized DCT coefficients are stored as they are in a
 //! JPEG XL VarDCT frame (8x8 DCT blocks, the JPEG's own quantization
-//! tables, YCbCr and the JPEG's chroma subsampling), so the image decodes
+//! tables, YCbCr and the JPEG's chroma subsampling; a grayscale image is
+//! luma with empty chroma), so the image decodes
 //! to what the JPEG holds, with no generation loss. Only the entropy
 //! coding changes. Reconstruction data (`recon`) lets a decoder write the
 //! JPEG file itself back.
@@ -22,10 +23,10 @@ mod recon;
 
 use frame::Frame;
 
-/// Recompress a baseline or progressive YCbCr JPEG as JPEG XL without
-/// changing its coefficients. `None` for files this cannot carry over
-/// (grayscale, CMYK, RGB-coded JPEGs, sampling factors other than 1 and 2,
-/// a zero in a quantization table).
+/// Recompress a baseline or progressive JPEG, YCbCr or grayscale, as
+/// JPEG XL without changing its coefficients. `None` for files this
+/// cannot carry over (CMYK, RGB-coded JPEGs, sampling factors other than
+/// 1 and 2, a zero in a quantization table).
 ///
 /// The result also holds what a JPEG XL decoder needs to write the
 /// original file back, byte for byte, whenever the format can describe
@@ -159,6 +160,9 @@ impl Meta {
                 icc.len() >= 132
                     && u32::from_be_bytes([icc[0], icc[1], icc[2], icc[3]]) as usize == icc.len()
                     && &icc[36..40] == b"acsp"
+                    // A profile for other than one channel says nothing
+                    // about a grayscale image.
+                    && (p.comps.len() != 1 || &icc[16..20] == b"GRAY")
             });
         Meta {
             icc,
@@ -224,6 +228,25 @@ mod tests {
         check_ans(&h);
         let h: Vec<u32> = (0..255).map(|i| if i == 0 { 1 << 30 } else { 1 }).collect();
         check_ans(&h);
+    }
+
+    #[test]
+    fn grayscale_keeps_only_a_grayscale_profile() {
+        let gray = [100u8; 16 * 16];
+        let profile = |space: &[u8; 4]| {
+            let mut icc = vec![0u8; 200];
+            icc[..4].copy_from_slice(&200u32.to_be_bytes());
+            icc[16..20].copy_from_slice(space);
+            icc[36..40].copy_from_slice(b"acsp");
+            icc
+        };
+        for (space, kept) in [(b"GRAY", true), (b"RGB ", false)] {
+            let e = crate::Encoder::new(80).icc_profile(&profile(space));
+            let jpeg = e.encode_gray(&gray, 16, 16);
+            let p = parse_and_decode(&jpeg, false, &Limits::default()).unwrap();
+            assert_eq!(Meta::read(&jpeg, &p).icc.is_some(), kept);
+            assert!(jpeg_to_jxl(&jpeg).is_some());
+        }
     }
 
     #[test]
