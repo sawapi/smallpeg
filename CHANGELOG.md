@@ -5,6 +5,12 @@ entries before it record development that preceded publication.
 
 ## Unreleased
 
+- `jxl` feature (experimental): `jpeg_to_jxl` and `jpeg_to_jxl_with`
+  return a `JxlOutput` with the file in `data` and, in `reconstruction`,
+  whether it holds what rebuilds the original JPEG byte for byte. They
+  returned the bytes alone, which did not say when that data had to be
+  left out.
+
 ## 0.16.0
 
 New: `Encoder::threads`, more of the encoder on worker threads with the

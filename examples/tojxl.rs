@@ -6,11 +6,16 @@ fn main() {
     let keep = a.get(3).is_none_or(|s| s != "--smallest");
     let options = smallpeg::JxlOptions::default().reconstruction(keep);
     let out = smallpeg::jpeg_to_jxl_with(&data, &options).expect("unsupported JPEG");
-    std::fs::write(&a[2], &out).unwrap();
+    std::fs::write(&a[2], &out.data).unwrap();
     println!(
-        "{} -> {} bytes ({:.1}%)",
+        "{} -> {} bytes ({:.1}%), {}",
         data.len(),
-        out.len(),
-        100.0 * out.len() as f64 / data.len() as f64
+        out.data.len(),
+        100.0 * out.data.len() as f64 / data.len() as f64,
+        if out.reconstruction {
+            "the JPEG file can be rebuilt"
+        } else {
+            "image only"
+        }
     );
 }
