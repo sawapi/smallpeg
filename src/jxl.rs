@@ -28,11 +28,24 @@ use frame::Frame;
 /// cannot carry over (CMYK, RGB-coded JPEGs, sampling factors other than
 /// 1 and 2, a zero in a quantization table).
 ///
-/// The result also holds what a JPEG XL decoder needs to write the
-/// original file back, byte for byte: see
-/// [`JxlOptions::reconstruction`] for what that costs and when it is
-/// left out. The color profile, Exif and XMP carry over either way
+/// The file also holds what a JPEG XL decoder needs to write the
+/// original JPEG back, byte for byte, when the format can describe it:
+/// [`JxlOutput::reconstruction`] says whether it does, and
+/// [`JxlOptions::reconstruction`] what that costs and when it is left
+/// out. The color profile, Exif and XMP carry over either way
 /// ([`strip_metadata`](crate::strip_metadata) first removes them).
+///
+/// ```
+/// # let rgb = [128u8; 16 * 16 * 3];
+/// # let jpeg = smallpeg::Encoder::new(80).encode_rgb(&rgb, 16, 16);
+/// if let Some(jxl) = smallpeg::jpeg_to_jxl(&jpeg) {
+///     // jxl.data is the file to keep.
+///     if jxl.reconstruction {
+///         // A decoder can rebuild the JPEG from it, so the JPEG can go.
+///     }
+/// #   assert!(jxl.reconstruction && !jxl.data.is_empty());
+/// }
+/// ```
 ///
 /// It runs on one thread whatever the features, and takes about 20 to 50
 /// bytes of memory per pixel, more the finer the JPEG's quantization: a
@@ -41,8 +54,22 @@ use frame::Frame;
 ///
 /// Experimental (the `jxl` feature): this function and its output may
 /// change in any release.
-pub fn jpeg_to_jxl(data: &[u8]) -> Option<Vec<u8>> {
+pub fn jpeg_to_jxl(data: &[u8]) -> Option<JxlOutput> {
     jpeg_to_jxl_with(data, &JxlOptions::default())
+}
+
+/// What [`jpeg_to_jxl`] returns. Experimental like the functions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct JxlOutput {
+    /// The JPEG XL file.
+    pub data: Vec<u8>,
+    /// Whether the file holds what a decoder needs to write the original
+    /// JPEG back byte for byte. False when
+    /// [`JxlOptions::reconstruction`] is off, and when the format cannot
+    /// describe the JPEG: the image is carried over all the same, but
+    /// then the JPEG file itself cannot be had back from it.
+    pub reconstruction: bool,
 }
 
 /// Options for [`jpeg_to_jxl_with`]. Experimental like the functions.
@@ -67,11 +94,11 @@ pub struct JxlOptions {
     /// the end of the image, so a file with a large trailer grows by
     /// about that much.
     ///
-    /// It is left out, with no sign in the return value, when the format
-    /// cannot describe the file: one that changes its restart interval
-    /// between scans, for example, or has more than about 4 MB after the
-    /// end of the image. The image is carried over all the same. Output
-    /// with it is a JPEG XL container holding a `jbrd` box.
+    /// It is left out when the format cannot describe the file: one that
+    /// changes its restart interval between scans, for example, or has
+    /// more than about 4 MB after the end of the image. The image is
+    /// carried over all the same, and [`JxlOutput::reconstruction`] is
+    /// false. Output with it is a JPEG XL container holding a `jbrd` box.
     pub reconstruction: bool,
 }
 
@@ -99,7 +126,7 @@ impl JxlOptions {
 }
 
 /// [`jpeg_to_jxl`] with options. Experimental in the same way.
-pub fn jpeg_to_jxl_with(data: &[u8], options: &JxlOptions) -> Option<Vec<u8>> {
+pub fn jpeg_to_jxl_with(data: &[u8], options: &JxlOptions) -> Option<JxlOutput> {
     let p = parse_and_decode(data, false, &options.limits)?;
     let f = Frame::new(&p)?;
     let meta = Meta::read(data, &p);
@@ -107,13 +134,14 @@ pub fn jpeg_to_jxl_with(data: &[u8], options: &JxlOptions) -> Option<Vec<u8>> {
     let jbrd = (options.reconstruction)
         .then(|| recon::data(data, &p, &meta))
         .flatten();
-    Some(
-        if meta.exif.is_none() && meta.xmp.is_none() && jbrd.is_none() {
+    Some(JxlOutput {
+        reconstruction: jbrd.is_some(),
+        data: if meta.exif.is_none() && meta.xmp.is_none() && jbrd.is_none() {
             codestream
         } else {
             container(&codestream, &meta, jbrd.as_deref())
         },
-    )
+    })
 }
 
 /// What carries over from the JPEG besides the image: the color profile

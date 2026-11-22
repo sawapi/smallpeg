@@ -338,7 +338,7 @@ mod tests {
         dht.extend(0..255u8);
         let sos = d.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
         d.splice(sos..sos, dht);
-        assert!(crate::jpeg_to_jxl(&d).is_some());
+        assert!(!crate::jpeg_to_jxl(&d).unwrap().reconstruction);
         assert!(boxed(&d).is_none());
     }
 
@@ -349,10 +349,11 @@ mod tests {
         let with = crate::jpeg_to_jxl(d).unwrap();
         let options = crate::JxlOptions::default().reconstruction(false);
         let without = crate::jpeg_to_jxl_with(d, &options).unwrap();
-        assert!(has_box(&with) && !has_box(&without));
-        assert!(without.len() < with.len());
+        assert!(with.reconstruction && has_box(&with.data));
+        assert!(!without.reconstruction && !has_box(&without.data));
+        assert!(without.data.len() < with.data.len());
         // Without it, and with no Exif or XMP, the codestream stands alone.
-        assert!(without.starts_with(&[0xFF, 0x0A]));
+        assert!(without.data.starts_with(&[0xFF, 0x0A]));
     }
 
     #[test]
