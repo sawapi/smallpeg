@@ -5,6 +5,11 @@ entries before it record development that preceded publication.
 
 ## Unreleased
 
+- `jxl` feature (experimental): `jpeg_to_jxl` takes less than half the
+  memory: about 6 to 21 bytes per pixel, from 9 to 50. The tokens it
+  holds before coding are packed into four bytes each, and they and the
+  finished sections are let go as they are used. The output is
+  unchanged.
 - npm: new entry points `smallpeg/jxl` and `smallpeg/jxl/web` with
   `toJxl(jpeg, options?)`, the experimental JPEG to JPEG XL conversion.
   It returns `{ data, reconstruction }`, or `undefined` for a file it

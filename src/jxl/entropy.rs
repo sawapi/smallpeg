@@ -39,10 +39,14 @@ enum Codes {
 
 impl Code {
     /// Writes one stream of symbols (one decoder reader's worth).
-    pub(super) fn put_all(&self, w: &mut Bits, tokens: &[(u32, u32)]) {
+    /// Codes `tokens`, (context, value) each, in order.
+    pub(super) fn put_all<I>(&self, w: &mut Bits, tokens: I)
+    where
+        I: DoubleEndedIterator<Item = (u32, u32)>,
+    {
         match &self.codes {
             Codes::Prefix { lens, codes } => {
-                for &(c, v) in tokens {
+                for (c, v) in tokens {
                     let cl = self.ctx_map[c as usize] as usize;
                     let (t, nb, bits) = hybrid(v);
                     w.put(lens[cl][t] as u32, codes[cl][t] as u64);
@@ -53,8 +57,8 @@ impl Code {
                 // ANS codes backwards; the decoder then reads the final
                 // state first and each symbol's refill before its raw bits.
                 let mut state: u32 = 0x13_0000;
-                let mut out = Vec::with_capacity(tokens.len());
-                for &(c, v) in tokens.iter().rev() {
+                let mut out = Vec::with_capacity(tokens.size_hint().0);
+                for (c, v) in tokens.rev() {
                     let cl = self.ctx_map[c as usize] as usize;
                     let (t, nb, bits) = hybrid(v);
                     let f = freq[cl][t] as u32;
@@ -356,8 +360,8 @@ pub(super) fn write_context_map(w: &mut Bits, map: &[u8]) {
             map.iter().map(|&m| m as u32).collect()
         };
         let tokens: Tokens = vals.iter().map(|&v| (0, v)).collect();
-        let code = write_histograms(&mut s, 1, &[&tokens]);
-        code.put_all(&mut s, &tokens);
+        let code = write_histograms(&mut s, 1, tokens.iter().copied());
+        code.put_all(&mut s, tokens.iter().copied());
         if best.as_ref().is_none_or(|b| s.len() < b.len()) {
             best = Some(s);
         }
@@ -368,9 +372,13 @@ pub(super) fn write_context_map(w: &mut Bits, map: &[u8]) {
 /// Clusters the contexts of `tokens`, writes the histograms (context map,
 /// integer configurations and codes, prefix or ANS, whichever is smaller)
 /// and returns the codes.
-pub(super) fn write_histograms(w: &mut Bits, num_ctx: usize, parts: &[&[(u32, u32)]]) -> Code {
+pub(super) fn write_histograms(
+    w: &mut Bits,
+    num_ctx: usize,
+    tokens: impl Iterator<Item = (u32, u32)>,
+) -> Code {
     let mut hists: Vec<Vec<u32>> = vec![Vec::new(); num_ctx];
-    for &(c, v) in parts.iter().flat_map(|t| t.iter()) {
+    for (c, v) in tokens {
         let t = hybrid(v).0;
         let h = &mut hists[c as usize];
         if h.len() <= t {

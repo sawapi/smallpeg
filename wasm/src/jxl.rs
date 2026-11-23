@@ -25,19 +25,14 @@ impl Jxl {
     }
 }
 
-/// Largest frame converted. The conversion takes up to about 55 bytes per
-/// pixel, and a WebAssembly module can address 4 GB: past that it traps
-/// and is left unusable. At this size the worst case measured (noise at
-/// quality 100 and full chroma) took 2.8 GB.
-const MAX_PIXELS: u64 = 50_000_000;
-
 /// Recompress a JPEG as JPEG XL without changing its coefficients;
 /// `reconstruction` includes what rebuilds the JPEG file.
 #[wasm_bindgen]
 pub fn to_jxl(jpeg: &[u8], reconstruction: bool) -> Option<Jxl> {
-    let options = smallpeg::JxlOptions::default()
-        .limits(smallpeg::Limits::default().max_pixels(MAX_PIXELS))
-        .reconstruction(reconstruction);
+    // The default limit of 100 megapixels stands: the worst case measured
+    // at that size (noise at quality 100 and full chroma) takes about 3 GB
+    // of the 4 GB a WebAssembly module can address.
+    let options = smallpeg::JxlOptions::default().reconstruction(reconstruction);
     smallpeg::jpeg_to_jxl_with(jpeg, &options).map(|out| Jxl {
         data: out.data,
         reconstruction: out.reconstruction,

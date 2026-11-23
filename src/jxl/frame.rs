@@ -100,17 +100,53 @@ impl BlockCtx {
         self.map[ch * NUM_ORDERS * k + fb * k / (self.fine.len() + 1)] as u32
     }
 }
+/// An AC token before the block contexts are chosen, in four bytes (they
+/// are most of what a conversion holds in memory): its context within a
+/// block context (nonzero counts first, then coefficients), its place
+/// (channel and fine bucket, as `channel * 8 + bucket`), and its value.
+#[derive(Clone, Copy)]
+struct AcToken(u32);
+
+impl AcToken {
+    fn new(local: u32, place: u8, value: u32) -> Self {
+        debug_assert!(local < 1 << 9 && place < 1 << 5 && value < 1 << 18);
+        AcToken(local | (place as u32) << 9 | value << 14)
+    }
+
+    fn local(self) -> u32 {
+        self.0 & 0x1FF
+    }
+
+    fn place(self) -> usize {
+        (self.0 >> 9 & 0x1F) as usize
+    }
+
+    fn value(self) -> u32 {
+        self.0 >> 14
+    }
+
+    /// As (context, value) under the block contexts `bctx`.
+    fn coded(self, bctx: &BlockCtx) -> (u32, u32) {
+        let bc = bctx.get(self.place() / 8, self.place() % 8);
+        let local = self.local();
+        let ctx = if local < NON_ZERO_BUCKETS {
+            local * bctx.num + bc
+        } else {
+            bctx.num * NON_ZERO_BUCKETS + ZERO_DENSITY_CONTEXTS * bc + (local - NON_ZERO_BUCKETS)
+        };
+        (ctx, self.value())
+    }
+}
+
 /// How many block contexts each channel gets (Y, Cb, Cr order): the
 /// grouping of the `f` fine buckets with the least estimated cost, within
 /// the format's limit of 16 in all. `ac` holds tokens with local
 /// contexts, `wh` each one's JPEG XL channel (Cb, Y, Cr) and fine bucket.
-fn choose_block_ctx(ac: &[Tokens], wh: &[Vec<u8>], f: usize) -> [usize; 3] {
+fn choose_block_ctx(ac: &[Vec<AcToken>], f: usize) -> [usize; 3] {
     const LOCAL: usize = (NON_ZERO_BUCKETS + ZERO_DENSITY_CONTEXTS) as usize;
     let mut hist = vec![[0u32; 64]; 3 * 8 * LOCAL];
-    for (t, w) in ac.iter().zip(wh) {
-        for (&(ctx, v), &at) in t.iter().zip(w) {
-            hist[at as usize * LOCAL + ctx as usize][hybrid(v).0.min(63)] += 1;
-        }
+    for t in ac.iter().flatten() {
+        hist[t.place() * LOCAL + t.local() as usize][hybrid(t.value()).0.min(63)] += 1;
     }
     let cost = |h: &[u32; 64]| {
         let mut wide = [0u32; 128];
@@ -486,17 +522,15 @@ impl<'a> Frame<'a> {
             .any(|p| p.iter().enumerate().any(|(i, &v)| i != v));
         let orders: [[usize; 64]; 3] =
             std::array::from_fn(|c| std::array::from_fn(|k| to_zz[nat[perms[c][k]]]));
-        // AC tokens with contexts local to a block context (nonzero counts
-        // first, then coefficients), and each token's channel and fine
-        // bucket; the block contexts are chosen from them below.
+        // AC tokens with contexts local to a block context, and each one's
+        // channel and fine bucket; the block contexts are chosen from them
+        // below.
         let fb = BlockCtx::new(fine.clone(), [1; 3]);
-        let mut ac: Vec<Tokens> = Vec::new();
-        let mut ac_where: Vec<Vec<u8>> = Vec::new();
+        let mut ac: Vec<Vec<AcToken>> = Vec::new();
         for g in 0..num_groups {
-            let mut wh = Vec::new();
             let (ox, oy) = ((g % groups_x) * 32, (g / groups_x) * 32);
             let (gw, gh) = ((self.xblocks - ox).min(32), (self.yblocks - oy).min(32));
-            let mut t = Tokens::new();
+            let mut t = Vec::new();
             let mut nz = [[0u8; 32]; 3];
             for by in 0..gh {
                 for bx in 0..gw {
@@ -519,8 +553,11 @@ impl<'a> Frame<'a> {
                         let dc =
                             luma.blk(((oy + by) >> luma.vs) * luma.bw + ((ox + bx) >> luma.hs))[0];
                         let at = (c * 8 + fb.bucket(dc as i32)) as u8;
-                        t.push((nonzero_context(predicted, 0, 1), nonzeros as u32));
-                        wh.push(at);
+                        t.push(AcToken::new(
+                            nonzero_context(predicted, 0, 1),
+                            at,
+                            nonzeros as u32,
+                        ));
                         nz[c][sbx] = nonzeros as u8;
                         if nonzeros == 0 {
                             continue;
@@ -534,8 +571,7 @@ impl<'a> Frame<'a> {
                                 + COEFF_NUM_NONZERO_CONTEXT[left]
                                 + COEFF_FREQ_CONTEXT[k]
                                 + prev;
-                            t.push((ctx, pack_signed(v)));
-                            wh.push(at);
+                            t.push(AcToken::new(ctx, at, pack_signed(v)));
                             if v == 0 {
                                 prev = 0;
                                 continue;
@@ -549,23 +585,11 @@ impl<'a> Frame<'a> {
                     }
                 }
             }
+            // Kept until the end: give back what growing it left over.
+            t.shrink_to_fit();
             ac.push(t);
-            ac_where.push(wh);
         }
-        let bctx = BlockCtx::new(fine, choose_block_ctx(&ac, &ac_where, fb.fine.len() + 1));
-        for (t, wh) in ac.iter_mut().zip(&ac_where) {
-            for (tok, &at) in t.iter_mut().zip(wh) {
-                let bc = bctx.get(at as usize / 8, at as usize % 8);
-                tok.0 = if tok.0 < NON_ZERO_BUCKETS {
-                    tok.0 * bctx.num + bc
-                } else {
-                    bctx.num * NON_ZERO_BUCKETS
-                        + ZERO_DENSITY_CONTEXTS * bc
-                        + (tok.0 - NON_ZERO_BUCKETS)
-                };
-            }
-        }
-        drop(ac_where);
+        let bctx = BlockCtx::new(fine, choose_block_ctx(&ac, fb.fine.len() + 1));
         bctx.write(&mut lfg);
         lfg.bit(false); // color correlation: none (YCbCr)
         lfg.put(2, 0);
@@ -575,14 +599,14 @@ impl<'a> Frame<'a> {
         lfg.put(8, 128);
         lfg.bit(true); // global tree
         let tree_tokens = tree.tokens();
-        let tc = write_histograms(&mut lfg, 6, &[&tree_tokens]);
-        tc.put_all(&mut lfg, &tree_tokens);
-        let all: Vec<&[(u32, u32)]> = std::iter::once(&qt_tokens)
+        let tc = write_histograms(&mut lfg, 6, tree_tokens.iter().copied());
+        tc.put_all(&mut lfg, tree_tokens.iter().copied());
+        let all = std::iter::once(&qt_tokens)
             .chain(&lf_tokens)
             .chain(&meta_tokens)
-            .map(|t| &t[..])
-            .collect();
-        let mc = write_histograms(&mut lfg, tree.leaves, &all);
+            .flatten()
+            .copied();
+        let mc = write_histograms(&mut lfg, tree.leaves, all);
 
         // ---- LF groups
         let mut lf_sections = Vec::new();
@@ -590,11 +614,11 @@ impl<'a> Frame<'a> {
             let mut s = Bits::default();
             s.put(2, 0); // no extra precision
             modular_header(&mut s);
-            mc.put_all(&mut s, &lf_tokens[g]);
+            mc.put_all(&mut s, lf_tokens[g].iter().copied());
             let (bw, bh) = lf_rects[g];
             s.put(ceil_log2(bw * bh), (bw * bh - 1) as u64);
             modular_header(&mut s);
-            mc.put_all(&mut s, &meta_tokens[g]);
+            mc.put_all(&mut s, meta_tokens[g].iter().copied());
             lf_sections.push(s);
         }
 
@@ -606,7 +630,7 @@ impl<'a> Frame<'a> {
                 hfg.put(3, 7); // raw table for DCT8: the JPEG's own
                 hfg.f16(1.0f32 / (8.0 * 255.0));
                 modular_header(&mut hfg);
-                mc.put_all(&mut hfg, &qt_tokens);
+                mc.put_all(&mut hfg, qt_tokens.iter().copied());
             } else {
                 hfg.put(3, 0); // library default (unused)
             }
@@ -619,20 +643,21 @@ impl<'a> Frame<'a> {
             for p in &perms {
                 permutation_tokens(p, &mut t);
             }
-            let code = write_histograms(&mut hfg, 8, &[&t]);
-            code.put_all(&mut hfg, &t);
+            let code = write_histograms(&mut hfg, 8, t.iter().copied());
+            code.put_all(&mut hfg, t.iter().copied());
         } else {
             hfg.put(2, 2); // natural coefficient orders
         }
         let num_ac = bctx.num * (NON_ZERO_BUCKETS + ZERO_DENSITY_CONTEXTS);
-        let all_ac: Vec<&[(u32, u32)]> = ac.iter().map(|t| &t[..]).collect();
-        let acc = write_histograms(&mut hfg, num_ac as usize, &all_ac);
+        let all_ac = ac.iter().flatten().map(|t| t.coded(&bctx));
+        let acc = write_histograms(&mut hfg, num_ac as usize, all_ac);
 
         // ---- pass groups
+        // Each group's tokens are let go once they are coded.
         let mut pass_sections = Vec::new();
-        for t in &ac {
+        for t in ac {
             let mut s = Bits::default();
-            acc.put_all(&mut s, t);
+            acc.put_all(&mut s, t.iter().map(|t| t.coded(&bctx)));
             pass_sections.push(s);
         }
 
@@ -658,8 +683,10 @@ impl<'a> Frame<'a> {
                 w.u32(s.out.len() as u32, TOC_DIST);
             }
             w.pad();
-            for s in &sections {
-                w.append(s);
+            // Room for all of them at once, and each let go as it is copied.
+            w.out.reserve(sections.iter().map(|s| s.out.len()).sum());
+            for s in sections {
+                w.append(&s);
             }
         }
         w.pad();
