@@ -10,6 +10,10 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Build the module behind `smallpeg/jxl` instead of the main one.
+jxl = ["smallpeg/jxl"]
+
 [dependencies]
 smallpeg = { path = ".." }
 # Pinned: must match the wasm-bindgen CLI that generates the JS glue.

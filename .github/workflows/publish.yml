@@ -105,6 +105,8 @@ jobs:
           npm install "$RUNNER_TEMP"/pack/smallpeg-*.tgz
           node -e 'const s = require("smallpeg"); const j = s.encode({ data: new Uint8Array(48), width: 4, height: 4 }); if (s.info(j).width !== 4) process.exit(1); console.log("require ok", j.length)'
           node --input-type=module -e 'import { encode, decode } from "smallpeg"; const j = encode({ data: new Uint8Array(64), width: 4, height: 4 }); if (decode(j).width !== 4) process.exit(1); console.log("import ok", j.length)'
+          node -e 'const s = require("smallpeg"); const x = require("smallpeg/jxl"); const o = x.toJxl(s.encode({ data: new Uint8Array(192), width: 8, height: 8 })); if (!o.reconstruction || o.data[4] !== 0x4a) process.exit(1); console.log("jxl require ok", o.data.length)'
+          node --input-type=module -e 'import { encode } from "smallpeg"; import { toJxl } from "smallpeg/jxl"; import * as web from "smallpeg/jxl/web"; const o = toJxl(encode({ data: new Uint8Array(192), width: 8, height: 8 })); if (!o.reconstruction || typeof web.init !== "function") process.exit(1); console.log("jxl import ok", o.data.length)'
           # The published types resolve for a consumer, for both entry points.
           printf '%s\n' 'import { encode, type Image } from "smallpeg";' 'import { init } from "smallpeg/web";' 'await init();' 'const i: Image = { data: new Uint8Array(3), width: 1, height: 1, channels: 3 };' 'encode(i, { quality: 90 });' > check.mts
           "$GITHUB_WORKSPACE"/npm/node_modules/.bin/tsc --noEmit --strict --module nodenext --target es2022 --lib es2022,dom --types "" check.mts

@@ -5,6 +5,12 @@ entries before it record development that preceded publication.
 
 ## Unreleased
 
+- npm: new entry points `smallpeg/jxl` and `smallpeg/jxl/web` with
+  `toJxl(jpeg, options?)`, the experimental JPEG to JPEG XL conversion.
+  It returns `{ data, reconstruction }`, or `undefined` for a file it
+  cannot convert. They have a `.wasm` file of their own, so the main
+  entry points load no more than before. Experimental: may change in any
+  release.
 - `jxl` feature (experimental): `jpeg_to_jxl` and `jpeg_to_jxl_with`
   return a `JxlOutput` with the file in `data` and, in `reconstruction`,
   whether it holds what rebuilds the original JPEG byte for byte. They

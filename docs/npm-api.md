@@ -10,6 +10,7 @@ function's documentation shows up in editors.
 | `"smallpeg"` | Node, and browsers through a bundler (resolves to the browser build there) |
 | `"smallpeg/web"` | Browsers and bundlers, explicitly |
 | `"smallpeg/worker"` | Browsers and bundlers: the same functions run in a Web Worker ([below](#in-a-web-worker)) |
+| `"smallpeg/jxl"`, `"smallpeg/jxl/web"` | Experimental: JPEG to JPEG XL ([below](#experimental-jpeg-xl)), with a `.wasm` file of its own |
 
 The first two export the same functions. The browser build has to load its `.wasm`
 file before use:
@@ -206,6 +207,62 @@ smallpeg.terminate(); // when done
   `"RuntimeError"`. The worker then stops, since the module may be left
   in an inconsistent state: later calls reject, and `terminate()` it and
   create a new one to go on.
+
+## Experimental: JPEG XL
+
+`smallpeg/jxl` recompresses a JPEG as JPEG XL without changing the image.
+It is experimental: the function and its output may change in any
+release.
+
+```js
+import { init, toJxl } from "smallpeg/jxl";
+
+await init(); // in the browser; does nothing in Node
+const out = toJxl(jpeg);
+if (out) {
+  // out.data is the JPEG XL file.
+  if (out.reconstruction) {
+    // A JPEG XL decoder can write the original JPEG back from it, byte
+    // for byte, so the JPEG need not be kept.
+  }
+}
+```
+
+### `toJxl(jpeg, options?)`
+
+Returns `{ data, reconstruction }`, or `undefined` for a file it cannot
+convert (CMYK and RGB-coded JPEGs, frames over 50 megapixels, and input
+it cannot read). Color and
+grayscale JPEGs, baseline and progressive. The JPEG's coefficients are
+stored as they are, so the image is the same; a photo's file comes out
+about 10% smaller. The color profile, Exif and XMP carry over
+(`stripMetadata` first removes Exif and XMP).
+
+- `reconstruction` (option, default true): include what a decoder needs
+  to rebuild the JPEG file itself. A few hundred bytes for most files,
+  plus whatever the file holds beyond the image and that metadata, such
+  as data after the end of the image.
+- `reconstruction` (in the result): whether that data is there. False
+  when the option is off, and when the format cannot describe the file
+  (for example one that changes its restart interval between scans); the
+  image is converted all the same.
+
+It takes about 12 to 55 bytes of memory per pixel, more for full-color
+(4:4:4), high-quality and noisy images: a 24-megapixel photo needs about
+400 MB. The 50-megapixel limit keeps the worst case within what a
+WebAssembly module can address. Should the module still trap (a
+`WebAssembly.RuntimeError`), it may be left unusable: restart the
+process in Node, reload the page in the browser.
+
+### Loading
+
+The entry point has a `.wasm` file of its own
+(`jxl-web/smallpeg_jxl_wasm_bg.wasm`), about the size of the main one, so
+pages that do not use it do not load it. `init` and `initSync` work as for
+the main entry points, on that file: loading one does not load the other.
+`"smallpeg/jxl"` resolves to the Node build in Node and to the browser
+build elsewhere; `"smallpeg/jxl/web"` is the browser build explicitly.
+There is no worker entry point for it yet.
 
 ## Example: shrink a photo for upload
 
