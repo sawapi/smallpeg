@@ -35,8 +35,12 @@ impl Bits {
     }
 
     pub(super) fn append(&mut self, o: &Bits) {
-        for &b in &o.out {
-            self.put(8, b as u64);
+        if self.n == 0 {
+            self.out.extend_from_slice(&o.out);
+        } else {
+            for &b in &o.out {
+                self.put(8, b as u64);
+            }
         }
         self.put(o.n, o.acc);
     }

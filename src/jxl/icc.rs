@@ -60,8 +60,8 @@ pub(super) fn write_icc(w: &mut Bits, icc: &[u8]) {
         tokens.push((ctx, b as u32));
     }
     w.u64(stream.len() as u64);
-    let code = write_histograms(w, 41, &[&tokens]);
-    code.put_all(w, &tokens);
+    let code = write_histograms(w, 41, tokens.iter().copied());
+    code.put_all(w, tokens.iter().copied());
 }
 
 /// The value JPEG XL predicts for byte `i` of an ICC header.
