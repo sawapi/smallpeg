@@ -152,12 +152,8 @@ pub(super) fn rebuild(r: &Recon, p: &Parsed, out: &mut Out) -> bool {
                 s.extend_from_slice(&p.height.to_be_bytes());
                 s.extend_from_slice(&p.width.to_be_bytes());
                 s.push(n);
-                for (i, c) in p.comps.iter().enumerate() {
-                    s.extend_from_slice(&[
-                        p.ids[i],
-                        ((c.h << 4) | c.v) as u8,
-                        r.quant[r.comp_quant[i]].index,
-                    ]);
+                for i in 0..p.comps.len() {
+                    s.extend_from_slice(&[p.ids[i], r.sampling[i], r.quant[r.comp_quant[i]].index]);
                 }
                 out.bytes(&s);
             }

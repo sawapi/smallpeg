@@ -1,6 +1,8 @@
 //! The frame: block contexts, coefficient orders, and the sections of the
 //! codestream.
 
+use std::borrow::Cow;
+
 use super::Meta;
 use super::bits::{Bits, ceil_log2, pack_signed};
 use super::entropy::{Tokens, hybrid, write_context_map, write_histograms};
@@ -179,8 +181,9 @@ struct Chan<'a> {
     hs: usize,
     vs: usize,
     /// Blocks of the JPEG component, row stride `bw`, zigzag order; none
-    /// for the chroma of a grayscale image, which is all zeros.
-    blocks: Option<&'a [[i16; 64]]>,
+    /// for the chroma of a grayscale image, which is all zeros. Owned
+    /// when the frame's grid is larger than the component's.
+    blocks: Option<Cow<'a, [[i16; 64]]>>,
     bw: usize,
     /// Quantization table in natural order.
     q: [u16; 64],
@@ -189,7 +192,7 @@ struct Chan<'a> {
 impl Chan<'_> {
     fn blk(&self, i: usize) -> &[i16; 64] {
         const ZERO: [i16; 64] = [0; 64];
-        match self.blocks {
+        match &self.blocks {
             Some(b) => &b[i],
             None => &ZERO,
         }
@@ -208,8 +211,32 @@ pub(super) struct Frame<'a> {
     yblocks: usize,
 }
 
+/// The frame's sampling mode for a component with these sampling factors.
+pub(super) fn sampling_mode(h: usize, v: usize) -> Option<u32> {
+    match (h, v) {
+        (1, 1) => Some(0),
+        (2, 2) => Some(1),
+        (2, 1) => Some(2),
+        (1, 2) => Some(3),
+        _ => None,
+    }
+}
+
+/// The sampling factors a one-component JPEG's frame header gives. They
+/// change nothing in the image, and the parser takes them as 1x1; only
+/// writing the header back needs them.
+pub(super) fn gray_sampling(data: &[u8], p: &Parsed) -> (usize, usize) {
+    // SOF: marker, length, precision, height, width, count, then per
+    // component its id, sampling factors and table.
+    let hv = data.get(p.frame_at + 11).copied().unwrap_or(0x11);
+    ((hv >> 4) as usize, (hv & 15) as usize)
+}
+
 impl<'a> Frame<'a> {
-    pub(super) fn new(p: &'a Parsed) -> Option<Self> {
+    /// The frame for `p`. A grayscale image takes `gray_hv` as its
+    /// sampling factors: 1x1, or the frame header's own so that a decoder
+    /// rebuilding the JPEG writes them back.
+    pub(super) fn new(p: &'a Parsed, gray_hv: (usize, usize)) -> Option<Self> {
         let gray = p.comps.len() == 1;
         if !gray {
             if p.comps.len() != 3 || p.adobe == Some(0) {
@@ -219,20 +246,14 @@ impl<'a> Frame<'a> {
                 return None;
             }
         }
-        let mode = |h: usize, v: usize| match (h, v) {
-            (1, 1) => Some(0u32),
-            (2, 2) => Some(1),
-            (2, 1) => Some(2),
-            (1, 2) => Some(3),
-            _ => None,
-        };
         const HS: [usize; 4] = [0, 1, 1, 0];
         const VS: [usize; 4] = [0, 1, 0, 1];
         let jpeg_of = if gray { [0usize; 3] } else { [1, 0, 2] };
         let mut up = [0u32; 3];
         for c in 0..3 {
             let j = &p.comps[jpeg_of[c]];
-            up[c] = mode(j.h, j.v)?;
+            let (h, v) = if gray { gray_hv } else { (j.h, j.v) };
+            up[c] = sampling_mode(h, v)?;
         }
         let maxhs = up.iter().map(|&m| HS[m as usize]).max().unwrap();
         let maxvs = up.iter().map(|&m| VS[m as usize]).max().unwrap();
@@ -253,15 +274,48 @@ impl<'a> Frame<'a> {
             for k in 0..64 {
                 q[ZIGZAG[k]] = qz[k];
             }
-            // The block grid must be the one JPEG XL derives.
-            if j.bw < xblocks >> hs || j.blocks.len() < (yblocks >> vs) * j.bw {
+            let (fw, fh) = (xblocks >> hs, yblocks >> vs);
+            let (blocks, bw) = if gray && c != 1 {
+                (None, fw)
+            } else if j.bw >= fw && j.blocks.len() >= fh * j.bw {
+                (Some(Cow::Borrowed(&j.blocks[..])), j.bw)
+            } else if gray && j.aw > 0 && j.ah > 0 && j.blocks.len() >= j.ah * j.bw {
+                // The frame is whole MCUs of the header's sampling factors,
+                // the component only the blocks its samples need. The
+                // blocks beyond them are in no scan, so they are free.
+                // A decoder smooths the DC image except at its border and
+                // where a neighbor is far off, so each gets a DC far
+                // outside the image's range: the last real row and column
+                // then stay as they are, as at the border of the frame
+                // without padding. (Up to the range of a coefficient;
+                // past that the edge is smoothed a little.)
+                let dcs = || {
+                    (0..j.ah).flat_map(|y| (0..j.aw).map(move |x| j.blocks[y * j.bw + x][0] as i32))
+                };
+                let (lo, hi) = (dcs().min()?, dcs().max()?);
+                let far = (hi + 3 + 3 * (hi - lo)).min(i16::MAX as i32) as i16;
+                let mut padded = Vec::with_capacity(fw * fh);
+                for y in 0..fh {
+                    for x in 0..fw {
+                        padded.push(if x < j.aw && y < j.ah {
+                            j.blocks[y * j.bw + x]
+                        } else {
+                            let mut b = [0i16; 64];
+                            b[0] = far;
+                            b
+                        });
+                    }
+                }
+                (Some(Cow::Owned(padded)), fw)
+            } else {
+                // The block grid must be the one JPEG XL derives.
                 return None;
-            }
+            };
             chans.push(Chan {
                 hs,
                 vs,
-                blocks: (!gray || c == 1).then_some(&j.blocks[..]),
-                bw: j.bw,
+                blocks,
+                bw,
                 q,
             });
         }

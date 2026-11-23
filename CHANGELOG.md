@@ -10,6 +10,11 @@ entries before it record development that preceded publication.
   whether it holds what rebuilds the original JPEG byte for byte. They
   returned the bytes alone, which did not say when that data had to be
   left out.
+- `jxl` feature (experimental): a grayscale JPEG whose frame header
+  gives sampling factors of 2x1, 1x2 or 2x2 now gets the data that
+  rebuilds it, as files with 1x1 did. Such headers are common (one
+  widely used encoder writes 2x1 for grayscale), and those files were
+  converted as images only.
 
 ## 0.16.0
 

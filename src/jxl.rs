@@ -128,12 +128,21 @@ impl JxlOptions {
 /// [`jpeg_to_jxl`] with options. Experimental in the same way.
 pub fn jpeg_to_jxl_with(data: &[u8], options: &JxlOptions) -> Option<JxlOutput> {
     let p = parse_and_decode(data, false, &options.limits)?;
-    let f = Frame::new(&p)?;
+    let mut f = Frame::new(&p, (1, 1))?;
     let meta = Meta::read(data, &p);
-    let codestream = f.encode(&meta);
-    let jbrd = (options.reconstruction)
+    let mut jbrd = (options.reconstruction)
         .then(|| recon::data(data, &p, &meta))
         .flatten();
+    // A grayscale JPEG whose frame header has other sampling factors than
+    // 1x1 needs them in the frame for a decoder to write them back.
+    let hv = frame::gray_sampling(data, &p);
+    if jbrd.is_some() && p.comps.len() == 1 && hv != (1, 1) {
+        match Frame::new(&p, hv) {
+            Some(with) => f = with,
+            None => jbrd = None,
+        }
+    }
+    let codestream = f.encode(&meta);
     Some(JxlOutput {
         reconstruction: jbrd.is_some(),
         data: if meta.exif.is_none() && meta.xmp.is_none() && jbrd.is_none() {
