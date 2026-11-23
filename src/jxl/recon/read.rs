@@ -2,6 +2,7 @@
 //! of its entropy-coded data.
 
 use super::{App, Huff, Quant, Recon, Scan, ScanBlocks, ScanComp, Tables, band};
+use crate::jxl::frame::{gray_sampling, sampling_mode};
 use crate::optimize::Parsed;
 
 /// Most markers a box can list.
@@ -137,12 +138,22 @@ pub(super) fn parse<'a>(d: &'a [u8], p: &Parsed) -> Option<Recon<'a>> {
     if !d.starts_with(&[0xFF, 0xD8]) || !(n == 1 || n == 3) || p.ids.len() != n {
         return None;
     }
+    // One component keeps the factors its header has, when a frame can
+    // carry them, although the image is the same with any.
+    let sampling: Vec<u8> = if n == 1 {
+        let (h, v) = gray_sampling(d, p);
+        sampling_mode(h, v)?;
+        vec![(h << 4 | v) as u8]
+    } else {
+        p.comps.iter().map(|c| (c.h << 4 | c.v) as u8).collect()
+    };
     let mut r = Recon {
         markers: Vec::new(),
         apps: Vec::new(),
         coms: Vec::new(),
         quant: Vec::new(),
         comp_quant: Vec::new(),
+        sampling,
         huff: Vec::new(),
         scans: Vec::new(),
         restart: None,

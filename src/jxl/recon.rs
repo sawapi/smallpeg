@@ -85,6 +85,9 @@ struct Recon<'a> {
     quant: Vec<Quant>,
     /// Which of `quant` each component uses.
     comp_quant: Vec<usize>,
+    /// The sampling factors of each component as the frame header has
+    /// them (horizontal in the high half).
+    sampling: Vec<u8>,
     huff: Vec<Huff>,
     scans: Vec<Scan>,
     restart: Option<u16>,
@@ -340,6 +343,42 @@ mod tests {
         d.splice(sos..sos, dht);
         assert!(!crate::jpeg_to_jxl(&d).unwrap().reconstruction);
         assert!(boxed(&d).is_none());
+    }
+
+    /// One component may give any sampling factors in its frame header;
+    /// they change nothing in the image, but the file has them.
+    #[test]
+    fn grayscale_keeps_its_header_s_sampling_factors() {
+        let gray: Vec<u8> = image(150, 91).chunks(3).map(|p| p[1]).collect();
+        for progressive in [false, true] {
+            let e = Encoder::new(85).progressive(progressive);
+            let d = e.encode_gray(&gray, 150, 91);
+            let sof = (d.windows(2))
+                .position(|w| w[0] == 0xFF && matches!(w[1], 0xC0 | 0xC2))
+                .unwrap();
+            assert_eq!(d[sof + 11], 0x11);
+            let plain = crate::jpeg_to_jxl(&d).unwrap();
+            assert!(plain.reconstruction);
+            for (hv, kept) in [
+                (0x21, true),
+                (0x12, true),
+                (0x22, true),
+                (0x41, false),
+                (0x13, false),
+            ] {
+                let mut d = d.clone();
+                d[sof + 11] = hv;
+                let out = crate::jpeg_to_jxl(&d).unwrap();
+                assert_eq!(out.reconstruction, kept, "{hv:#x}");
+                // Without the data to rebuild it, the file is the plain one's.
+                let options = crate::JxlOptions::default().reconstruction(false);
+                let small = crate::jpeg_to_jxl_with(&d, &options).unwrap();
+                assert!(!small.reconstruction);
+                if !kept {
+                    assert_eq!(out.data, small.data, "{hv:#x}");
+                }
+            }
+        }
     }
 
     #[test]
