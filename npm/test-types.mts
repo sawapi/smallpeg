@@ -20,6 +20,9 @@ import initDefault, {
 import type { Bytes, Channels, Image, ImageInput, JpegInfo } from "smallpeg";
 import * as web from "smallpeg/web";
 import { createWorker, type WorkerApi } from "smallpeg/worker";
+import initJxl, { toJxl, type JxlOptions, type JxlOutput } from "smallpeg/jxl";
+import type { Bytes as JxlBytes } from "smallpeg/jxl";
+import * as jxlWeb from "smallpeg/jxl/web";
 import type { Image as WorkerImage } from "smallpeg/worker";
 
 declare const jpeg: Uint8Array;
@@ -73,6 +76,29 @@ await web.default();
 web.initSync(new Uint8Array(0));
 web.initSync({ module: new Uint8Array(0) });
 web.encode(rgb, { quality: 75 });
+
+// smallpeg/jxl: its own entry points; the result says whether the JPEG
+// can be rebuilt.
+await initJxl();
+const jxlOptions: JxlOptions = { reconstruction: false };
+const jxl: JxlOutput | undefined = toJxl(jpeg, jxlOptions);
+if (jxl) {
+  const file: JxlBytes = jxl.data;
+  const same: Bytes = file; // the same type as the main entry points'
+  const rebuilds: boolean = jxl.reconstruction;
+  void [same, rebuilds];
+}
+// @ts-expect-error toJxl can return undefined
+const sureJxl: JxlOutput = toJxl(jpeg);
+// @ts-expect-error reconstruction is a boolean
+toJxl(jpeg, { reconstruction: 1 });
+// @ts-expect-error the option goes in an object
+toJxl(jpeg, false);
+await jxlWeb.init("https://example.com/smallpeg_jxl_wasm_bg.wasm");
+await jxlWeb.default(new Uint8Array(0));
+jxlWeb.initSync(new Uint8Array(0));
+jxlWeb.toJxl(jpeg);
+void sureJxl;
 
 // The worker API: same arguments, promised results.
 const w: WorkerApi = createWorker({ wasm: "https://example.com/smallpeg_wasm_bg.wasm" });

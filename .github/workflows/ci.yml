@@ -75,6 +75,8 @@ jobs:
         run: cargo fmt --manifest-path wasm/Cargo.toml --check
       - name: Clippy
         run: cargo clippy --manifest-path wasm/Cargo.toml --release --target wasm32-unknown-unknown -- -D warnings
+      - name: Clippy (the jxl module)
+        run: cargo clippy --manifest-path wasm/Cargo.toml --release --target wasm32-unknown-unknown --features jxl -- -D warnings
       - name: Install TypeScript
         run: cd npm && npm ci
       - name: Build

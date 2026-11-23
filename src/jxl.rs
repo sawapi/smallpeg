@@ -47,9 +47,9 @@ use frame::Frame;
 /// }
 /// ```
 ///
-/// It runs on one thread whatever the features, and takes about 20 to 50
-/// bytes of memory per pixel, more the finer the JPEG's quantization: a
-/// 24-megapixel photo needs about 400 MB. [`JxlOptions::limits`] bounds
+/// It runs on one thread whatever the features, and takes about 12 to 55
+/// bytes of memory per pixel, more for full chroma, fine quantization and
+/// noisy images: a 24-megapixel photo needs about 400 MB. [`JxlOptions::limits`] bounds
 /// the frame it accepts.
 ///
 /// Experimental (the `jxl` feature): this function and its output may

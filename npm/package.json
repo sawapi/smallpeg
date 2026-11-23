@@ -24,6 +24,20 @@
       "types": "./dist/worker.d.mts",
       "default": "./dist/worker.mjs"
     },
+    "./jxl": {
+      "node": {
+        "types": "./dist/jxl-node.d.mts",
+        "default": "./dist/jxl-node.mjs"
+      },
+      "default": {
+        "types": "./dist/jxl-web.d.mts",
+        "default": "./dist/jxl-web.mjs"
+      }
+    },
+    "./jxl/web": {
+      "types": "./dist/jxl-web.d.mts",
+      "default": "./dist/jxl-web.mjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -31,6 +45,8 @@
     "dist/*.d.mts",
     "node",
     "web",
+    "jxl-node",
+    "jxl-web",
     "LICENSE-MIT",
     "LICENSE-APACHE",
     "THIRD_PARTY.md"
@@ -62,7 +78,7 @@
     "./dist/worker-main.mjs"
   ],
   "scripts": {
-    "prepack": "node -e \"for (const f of ['dist/core.mjs','dist/core.d.mts','dist/node.mjs','dist/node.d.mts','dist/web.mjs','dist/web.d.mts','dist/worker.mjs','dist/worker.d.mts','dist/worker-main.mjs','dist/protocol.mjs','dist/protocol.d.mts','node/smallpeg_wasm_bg.wasm','web/smallpeg_wasm_bg.wasm']) require('fs').accessSync(f)\" || (cd .. && ./npm/build.sh)",
+    "prepack": "node -e \"for (const f of ['dist/core.mjs','dist/core.d.mts','dist/node.mjs','dist/node.d.mts','dist/web.mjs','dist/web.d.mts','dist/worker.mjs','dist/worker.d.mts','dist/worker-main.mjs','dist/protocol.mjs','dist/protocol.d.mts','dist/load.mjs','dist/jxl-core.mjs','dist/jxl-core.d.mts','dist/jxl-node.mjs','dist/jxl-node.d.mts','dist/jxl-web.mjs','dist/jxl-web.d.mts','node/smallpeg_wasm_bg.wasm','web/smallpeg_wasm_bg.wasm','jxl-node/smallpeg_jxl_wasm_bg.wasm','jxl-web/smallpeg_jxl_wasm_bg.wasm']) require('fs').accessSync(f)\" || (cd .. && ./npm/build.sh)",
     "test": "node test.mjs && tsc -p test-types.tsconfig.json && tsc -p test-types-node.tsconfig.json && tsc -p test-types-bundler.tsconfig.json"
   },
   "devDependencies": {

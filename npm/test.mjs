@@ -168,6 +168,63 @@ await testWorker(web, web.encode({ data: new Uint8Array(40 * 30 * 3).fill(90), w
 // Both builds export the same names.
 assert.deepEqual(Object.keys(node).sort(), Object.keys(web).sort());
 
+// smallpeg/jxl: entry points of its own, over a wasm module of its own.
+function runJxl(lib, name) {
+  const [width, height] = [96, 64];
+  const jpeg = node.encode({ data: gradient(width, height, 3), width, height });
+  const out = lib.toJxl(jpeg);
+  assert.deepEqual(Object.keys(out).sort(), ["data", "reconstruction"]);
+  assert.equal(out.reconstruction, true, `${name}: the JPEG can be rebuilt`);
+  // A JPEG XL container, which is what holds the reconstruction data.
+  assert.deepEqual([...out.data.subarray(0, 8)], [0, 0, 0, 12, 0x4a, 0x58, 0x4c, 0x20]);
+  assert.ok(out.data instanceof Uint8Array && out.data.buffer instanceof ArrayBuffer);
+  assert.ok(out.data.length < jpeg.length, `${name}: smaller than the JPEG`);
+  // Without it: a bare codestream, smaller still.
+  const bare = lib.toJxl(jpeg, { reconstruction: false });
+  assert.equal(bare.reconstruction, false);
+  assert.deepEqual([bare.data[0], bare.data[1]], [0xff, 0x0a]);
+  assert.ok(bare.data.length < out.data.length);
+  // Options left out, null or undefined mean the defaults.
+  assert.deepEqual(lib.toJxl(jpeg, null), out);
+  assert.deepEqual(lib.toJxl(jpeg, { reconstruction: undefined }), out);
+  // The bytes are the caller's own: a whole buffer, not a view into memory.
+  assert.equal(out.data.byteOffset, 0);
+  assert.equal(out.data.buffer.byteLength, out.data.length);
+  // Grayscale converts too.
+  const gray = node.encode({ data: gradient(width, height, 1), width, height });
+  assert.equal(lib.toJxl(gray).reconstruction, true);
+  // The flag is what happened, not what was asked for: a frame header with
+  // sampling factors the format cannot carry converts as an image only.
+  const odd = gray.slice();
+  const sof = odd.findIndex((b, i) => b === 0xff && (odd[i + 1] === 0xc0 || odd[i + 1] === 0xc2));
+  assert.equal(odd[sof + 11], 0x11);
+  odd[sof + 11] = 0x41;
+  const imageOnly = lib.toJxl(odd);
+  assert.equal(imageOnly.reconstruction, false, `${name}: asked for, but not possible`);
+  assert.deepEqual([imageOnly.data[0], imageOnly.data[1]], [0xff, 0x0a]);
+  assert.deepEqual(imageOnly, lib.toJxl(odd, { reconstruction: false }));
+  // Not a JPEG this reads: undefined, like the other functions.
+  assert.equal(lib.toJxl(new Uint8Array([1, 2, 3, 4])), undefined);
+  assert.equal(lib.toJxl(jpeg.subarray(0, jpeg.length >> 1)), undefined);
+  assert.throws(() => lib.toJxl("not bytes"), { name: "TypeError", message: /^smallpeg: the JPEG/ });
+  assert.throws(() => lib.toJxl(jpeg, { reconstruction: 1 }), { name: "TypeError", message: /^smallpeg: reconstruction/ });
+  assert.throws(() => lib.toJxl(jpeg, []), { name: "TypeError", message: /^smallpeg: options/ });
+  assert.ok(lib.toJxl(jpeg), `${name}: usable after an error`);
+  console.log(`${name}: ok`);
+  return out;
+}
+const jxlNode = await import("smallpeg/jxl");
+await jxlNode.init();
+const fromNode = runJxl(jxlNode, "jxl node");
+const jxlWeb = await import("smallpeg/jxl/web");
+await jxlWeb.init(readFileSync(new URL("./jxl-web/smallpeg_jxl_wasm_bg.wasm", import.meta.url)));
+assert.deepEqual(runJxl(jxlWeb, "jxl web"), fromNode, "the two jxl builds give the same file");
+assert.deepEqual(Object.keys(jxlNode).sort(), Object.keys(jxlWeb).sort());
+assert.deepEqual(Object.keys(jxlNode).sort(), ["default", "init", "initSync", "toJxl"]);
+// It stays out of the main entry points.
+assert.equal(node.toJxl, undefined);
+assert.equal(web.toJxl, undefined);
+
 // Each way of loading the wasm, in a fresh process: once the glue has
 // loaded, it ignores later loads, so one process would hide a broken form.
 const initCases = [
@@ -189,6 +246,18 @@ const initCases = [
   "web:require",
   "node:require",
   "node:browser-style-calls",
+  "jxl:before-init",
+  "jxl:main-init-is-not-enough",
+  "jxl:init-bytes",
+  "jxl:init-module",
+  "jxl:init-response",
+  "jxl:initSync-bytes",
+  "jxl:init-retry",
+  "jxl:initSync-during-init",
+  "jxl:init-wrong-object",
+  "jxl:require",
+  "jxl-node:require",
+  "jxl-node:browser-style-calls",
 ];
 const script = fileURLToPath(new URL("./test-init.mjs", import.meta.url));
 for (const c of initCases) {
@@ -208,3 +277,4 @@ function api(entry) {
   return lines.slice(lines.findIndex((l) => l.startsWith("export type {")));
 }
 assert.deepEqual(api("node"), api("web"), "node.d.mts and web.d.mts differ in the shared API");
+assert.deepEqual(api("jxl-node"), api("jxl-web"), "jxl-node.d.mts and jxl-web.d.mts differ in the shared API");

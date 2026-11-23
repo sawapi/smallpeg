@@ -4,24 +4,49 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const which = process.argv[2];
-const bytes = readFileSync(new URL("./web/smallpeg_wasm_bg.wasm", import.meta.url));
+const [entry, form] = which.split(":");
+// The jxl entry points have a wasm module, and a function, of their own.
+const jxl = entry.startsWith("jxl");
+const wasmFile = jxl ? "./jxl-web/smallpeg_jxl_wasm_bg.wasm" : "./web/smallpeg_wasm_bg.wasm";
+const bytes = readFileSync(new URL(wasmFile, import.meta.url));
 const response = () => new Response(bytes, { headers: { "content-type": "application/wasm" } });
 const pixel = { data: new Uint8Array([200, 100, 50]), width: 1, height: 1 };
 
-// Proves the wasm is live: a real encode comes back as JPEG bytes.
-function works(lib) {
+const names = { web: "smallpeg/web", node: "smallpeg", jxl: "smallpeg/jxl/web", "jxl-node": "smallpeg/jxl" };
+const fn = jxl ? "toJxl" : "encode";
+
+// Proves the wasm is live: a real encode comes back as JPEG bytes, or a
+// real conversion as a JPEG XL file.
+async function works(lib) {
+  if (jxl) {
+    const { encode } = await import("smallpeg"); // the Node build needs no init
+    const out = lib.toJxl(encode({ data: new Uint8Array(8 * 8 * 3).fill(100), width: 8, height: 8 }));
+    assert.equal(out.reconstruction, true);
+    return;
+  }
   const jpeg = lib.encode(pixel);
   assert.deepEqual([jpeg[0], jpeg[1]], [0xff, 0xd8]);
 }
 
-const [entry, form] = which.split(":");
-const lib = await import(entry === "web" ? "smallpeg/web" : "smallpeg");
+const lib = await import(names[entry]);
 
 switch (form) {
   case "before-init":
+    if (jxl) {
+      assert.throws(() => lib.toJxl(new Uint8Array(8)), /init\(\)/);
+      break;
+    }
     assert.throws(() => lib.encode(pixel), /init\(\)/);
     assert.throws(() => lib.decode(new Uint8Array(8)), /init\(\)/);
     break;
+  case "main-init-is-not-enough": {
+    // Each entry point loads its own module, and says which is missing.
+    const main = await import("smallpeg/web");
+    await main.init(readFileSync(new URL("./web/smallpeg_wasm_bg.wasm", import.meta.url)));
+    assert.throws(() => lib.toJxl(new Uint8Array(8)), /init\(\)` from smallpeg\/jxl/);
+    await lib.init(bytes);
+    break;
+  }
   case "init-bytes":
     await lib.init(bytes);
     break;
@@ -78,11 +103,11 @@ switch (form) {
     // require(esm), which engines ">=22.12" is there for.
     {
       const { createRequire } = await import("node:module");
-      const cjs = createRequire(import.meta.url)(entry === "web" ? "smallpeg/web" : "smallpeg");
-      assert.equal(typeof cjs.encode, "function");
+      const cjs = createRequire(import.meta.url)(names[entry]);
+      assert.equal(typeof cjs[fn], "function");
       assert.equal(cjs.default, cjs.init);
-      if (entry === "web") cjs.initSync(bytes);
-      works(cjs);
+      if (entry === "web" || entry === "jxl") cjs.initSync(bytes);
+      await works(cjs);
     }
     break;
   case "browser-style-calls":
@@ -94,5 +119,5 @@ switch (form) {
   default:
     throw new Error(`unknown case ${which}`);
 }
-if (form !== "before-init") works(lib);
+if (form !== "before-init") await works(lib);
 console.log(`${which} ok`);

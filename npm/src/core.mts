@@ -193,7 +193,7 @@ const MAX_PIXELS = 100_000_000;
 const MAX_SIDE = 65535;
 
 /** A value for an error message: strings quoted, everything else as is. */
-function show(v: unknown): string {
+export function show(v: unknown): string {
   if (typeof v === "string") return JSON.stringify(v);
   if (Array.isArray(v)) return "an array";
   try {
@@ -213,7 +213,7 @@ function int(name: string, v: number, min: number, max = MAX_U32): number {
 }
 
 /** JPEG input: a `Uint8Array` (a Node `Buffer` is one). */
-function jpegBytes(jpeg: Uint8Array): Uint8Array {
+export function jpegBytes(jpeg: Uint8Array): Uint8Array {
   if (!(jpeg instanceof Uint8Array)) {
     throw new TypeError("smallpeg: the JPEG must be a Uint8Array (a Node Buffer is fine)");
   }
@@ -230,7 +230,7 @@ function pixelBytes(data: Uint8Array | Uint8ClampedArray): Uint8Array {
 }
 
 /** `options` as an object: `undefined` and `null` mean defaults. */
-function opts<T extends object>(options: T | null | undefined): Partial<T> {
+export function opts<T extends object>(options: T | null | undefined): Partial<T> {
   if (options === undefined || options === null) return {};
   if (typeof options !== "object" || Array.isArray(options)) {
     throw new TypeError(`smallpeg: options must be an object, got ${show(options)}`);
@@ -248,7 +248,7 @@ function flag(value: unknown, name: string): boolean {
 }
 
 /** The glue's byte results are copies out of WebAssembly memory. */
-function owned(data: Uint8Array): Bytes {
+export function owned(data: Uint8Array): Bytes {
   return data as Bytes;
 }
 

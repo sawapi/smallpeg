@@ -3,6 +3,7 @@
 
 import initWasm, * as glue from "../web/smallpeg_wasm.js";
 import { type Api, makeApi, type ParamsMatch } from "./core.mjs";
+import { makeLoader } from "./load.mjs";
 
 // Fails to compile if the glue's parameters drift from what core expects.
 type Assert<T extends { [K in keyof T]: true }> = T;
@@ -23,16 +24,11 @@ export type WasmSource = string | object;
  */
 export type WasmModuleSource = object;
 
-let ready: Promise<void> | undefined;
-let loaded = false;
-
-// A plain object carrying `key` is wasm-bindgen's own argument form, which
-// 0.13 documented: pass it through. Anything else is the source itself.
-function isPlain(x: unknown, key: string): boolean {
-  return (
-    typeof x === "object" && x !== null && Object.getPrototypeOf(x) === Object.prototype && key in x
-  );
-}
+const loader = makeLoader(
+  initWasm as never,
+  glue.initSync as never,
+  "smallpeg: call `await init()` before using it in the browser",
+);
 
 /**
  * Load the wasm. Call (and await) it once before the other functions;
@@ -43,35 +39,7 @@ function isPlain(x: unknown, key: string): boolean {
  * copy it). Pass `wasm` to load it from elsewhere.
  */
 export function init(wasm?: WasmSource): Promise<void> {
-  // A plain object must be wasm-bindgen's form; `{}` or initSync's
-  // `{ module }` here is a mistake, not something to fetch around.
-  if (
-    typeof wasm === "object" &&
-    wasm !== null &&
-    Object.getPrototypeOf(wasm) === Object.prototype &&
-    !("module_or_path" in wasm)
-  ) {
-    return Promise.reject(
-      new TypeError("smallpeg: init() takes a URL, Response, bytes or WebAssembly.Module"),
-    );
-  }
-  // The casts: WasmSource is deliberately looser than the glue's DOM types.
-  const arg =
-    wasm === undefined
-      ? undefined
-      : isPlain(wasm, "module_or_path")
-        ? (wasm as never)
-        : { module_or_path: wasm as never };
-  ready ??= initWasm(arg).then(
-    () => {
-      loaded = true;
-    },
-    (err: unknown) => {
-      ready = undefined;
-      throw err;
-    },
-  );
-  return ready;
+  return loader.init(wasm);
 }
 
 /**
@@ -81,19 +49,12 @@ export function init(wasm?: WasmSource): Promise<void> {
  * {@link init}.
  */
 export function initSync(wasm: WasmModuleSource): void {
-  if (loaded) return;
-  // The glue would instantiate a second copy under the pending load.
-  if (ready) throw new Error("smallpeg: init() is still loading; await it instead");
-  glue.initSync(isPlain(wasm, "module") ? (wasm as never) : { module: wasm as never });
-  loaded = true;
-  ready = Promise.resolve();
+  loader.initSync(wasm);
 }
 
 export default init;
 
-const api = makeApi(glue, () => {
-  if (!loaded) throw new Error("smallpeg: call `await init()` before using it in the browser");
-});
+const api = makeApi(glue, loader.ensureReady);
 
 export type {
   Bytes,

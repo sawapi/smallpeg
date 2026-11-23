@@ -3,6 +3,8 @@
 /wasm/target/
 /npm/node/
 /npm/web/
+/npm/jxl-node/
+/npm/jxl-web/
 /npm/dist/
 /npm/node_modules/
 /npm/LICENSE-*
