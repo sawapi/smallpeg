@@ -6,14 +6,19 @@ entries before it record development that preceded publication.
 ## Unreleased
 
 - `jxl` feature (experimental): `jpeg_to_jxl` takes less than half the
-  memory: about 6 to 21 bytes per pixel, from 9 to 50. The tokens it
-  holds before coding are packed into four bytes each, and they and the
-  finished sections are let go as they are used. The output is
-  unchanged.
+  memory: about 6 to 21 bytes per pixel besides the JPEG and the result,
+  where the worst case was near 50. The tokens it holds before coding
+  are packed into four bytes each, and they and the finished sections
+  are let go as they are used. What a file holds besides the image
+  (comments, application segments) is copied once into the
+  reconstruction data and once into the result: a file that is mostly
+  such data takes about three times its size, down from about six. The
+  output is unchanged.
 - npm: new entry points `smallpeg/jxl` and `smallpeg/jxl/web` with
   `toJxl(jpeg, options?)`, the experimental JPEG to JPEG XL conversion.
   It returns `{ data, reconstruction }`, or `undefined` for a file it
-  cannot convert. They have a `.wasm` file of their own, so the main
+  cannot convert, which includes frames over 100 megapixels and files
+  over 512 MB. They have a `.wasm` file of their own, so the main
   entry points load no more than before. Experimental: may change in any
   release.
 - `jxl` feature (experimental): `jpeg_to_jxl` and `jpeg_to_jxl_with`

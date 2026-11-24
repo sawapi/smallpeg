@@ -48,9 +48,12 @@ use frame::Frame;
 /// ```
 ///
 /// It runs on one thread whatever the features, and takes about 6 to 21
-/// bytes of memory per pixel, more for full chroma, fine quantization and
-/// noisy images: a 24-megapixel photo needs about 150 to 300 MB. [`JxlOptions::limits`] bounds
-/// the frame it accepts.
+/// bytes of memory per pixel besides the JPEG and the result, more for
+/// full chroma, fine quantization and noisy images: a 24-megapixel photo
+/// needs about 150 to 500 MB. [`JxlOptions::limits`] bounds the frame it
+/// accepts. What the file holds besides the image (comments, application
+/// segments, data after the end) is held once more for the
+/// reconstruction data.
 ///
 /// Experimental (the `jxl` feature): this function and its output may
 /// change in any release.
@@ -228,7 +231,16 @@ impl Meta {
 /// The codestream in the JPEG XL container, with the reconstruction data
 /// and Exif and XMP boxes.
 fn container(codestream: &[u8], meta: &Meta, jbrd: Option<&[u8]>) -> Vec<u8> {
-    let mut out = Vec::with_capacity(codestream.len() + 1024);
+    // At its size: growing a file this large would hold it twice.
+    let boxed = |part: Option<usize>, head: usize| part.map_or(0, |n| 8 + head + n);
+    let size = 12
+        + 20
+        + boxed(jbrd.map(<[u8]>::len), 0)
+        + boxed(meta.exif.as_ref().map(Vec::len), 4)
+        + boxed(meta.xmp.as_ref().map(Vec::len), 0)
+        + 8
+        + codestream.len();
+    let mut out = Vec::with_capacity(size);
     let mut push_box = |kind: &[u8; 4], parts: &[&[u8]]| {
         let len: usize = 8 + parts.iter().map(|p| p.len()).sum::<usize>();
         out.extend_from_slice(&(len as u32).to_be_bytes());
@@ -249,6 +261,7 @@ fn container(codestream: &[u8], meta: &Meta, jbrd: Option<&[u8]>) -> Vec<u8> {
         push_box(b"xml ", &[x]);
     }
     push_box(b"jxlc", &[codestream]);
+    debug_assert_eq!(out.len(), size);
     out
 }
 
@@ -257,6 +270,39 @@ mod tests {
     use super::bits::Bits;
     use super::entropy::write_ans_histogram;
     use super::*;
+
+    /// The files do not change by accident: how tokens are held, ordered
+    /// and coded shows in every byte. A deliberate change to the output
+    /// updates these (and is checked with a decoder).
+    #[test]
+    fn output_is_as_it_was() {
+        fn fnv(d: &[u8]) -> u64 {
+            (d.iter()).fold(0xcbf29ce484222325, |h, &b| {
+                (h ^ b as u64).wrapping_mul(0x100000001b3)
+            })
+        }
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/site/samples/");
+        for (name, with, without) in [
+            (
+                "beach.thumb.jpg",
+                0xfdd56c307edd6e18u64,
+                0xa9000c03ce7bcdc2u64,
+            ),
+            ("lagoon.jpg", 0x5b645645dc391a64, 0x30f9e0ba04783fe0),
+        ] {
+            // The samples are not in the published crate.
+            let Ok(jpeg) = std::fs::read(format!("{dir}{name}")) else {
+                continue;
+            };
+            let got = [true, false].map(|on| {
+                let options = JxlOptions::default().reconstruction(on);
+                let out = jpeg_to_jxl_with(&jpeg, &options).unwrap();
+                assert_eq!(out.reconstruction, on, "{name}");
+                fnv(&out.data)
+            });
+            assert_eq!(got, [with, without], "{name}: {got:#018x?}");
+        }
+    }
 
     fn check_ans(h: &[u32]) {
         let mut w = Bits::default();
