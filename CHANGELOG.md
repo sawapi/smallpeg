@@ -5,6 +5,17 @@ entries before it record development that preceded publication.
 
 ## Unreleased
 
+## 0.17.0
+
+New in the npm package: `smallpeg/jxl`, the experimental JPEG to JPEG XL
+conversion, with a worker entry point of its own. The `jxl` feature's
+functions return a `JxlOutput` (a breaking change within the experimental
+feature), keep the reconstruction data for more grayscale files, and
+take less than half the memory. The encoder's and the re-coding
+functions' output is unchanged, and so is the JPEG XL output apart from
+those grayscale files. The npm package was last released at 0.15.0;
+nothing of 0.16.0 changed it.
+
 - `jxl` feature (experimental): `jpeg_to_jxl` takes less than half the
   memory: about 6 to 21 bytes per pixel besides the JPEG and the result,
   where the worst case was near 50. The tokens it holds before coding

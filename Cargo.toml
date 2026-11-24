@@ -1,6 +1,6 @@
 [package]
 name = "smallpeg"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 # 1.88 for let-chains and slice::as_chunks_mut (1.87 fails on both);
 # edition 2024 itself needs only 1.85. Verified by the msrv job in CI.
