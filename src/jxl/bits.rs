@@ -124,3 +124,37 @@ pub(super) fn pack_signed(v: i32) -> u32 {
         ((-(v as i64)) as u32) * 2 - 1
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Bits;
+
+    /// `append` copies whole bytes when it can; the result is the same as
+    /// writing the bits one at a time, wherever either side ends.
+    #[test]
+    fn append_is_the_bits_in_order() {
+        for lead in 0..9u32 {
+            for tail in 0..8u32 {
+                for bytes in [0usize, 1, 5] {
+                    let mut o = Bits::default();
+                    for i in 0..bytes {
+                        o.put(8, (i * 37 + 0xA5) as u64 & 0xFF);
+                    }
+                    o.put(tail, 0x55 & ((1 << tail) - 1));
+                    let (mut a, mut b) = (Bits::default(), Bits::default());
+                    a.put(lead, 0x1B3 & ((1 << lead) - 1));
+                    b.put(lead, 0x1B3 & ((1 << lead) - 1));
+                    a.append(&o);
+                    for i in 0..o.len() {
+                        let byte = o.out.get(i / 8).map_or(o.acc as u8, |&v| v);
+                        b.bit(byte >> (i % 8) & 1 == 1);
+                    }
+                    assert_eq!(a.len(), b.len(), "{lead} {tail} {bytes}");
+                    a.pad();
+                    b.pad();
+                    assert_eq!(a.out, b.out, "{lead} {tail} {bytes}");
+                }
+            }
+        }
+    }
+}

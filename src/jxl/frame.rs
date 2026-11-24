@@ -830,3 +830,24 @@ fn permutation_tokens(perm: &[usize; 64], out: &mut Tokens) {
         prev = c;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AcToken;
+
+    /// The three fields come back as packed, at their ends and between.
+    #[test]
+    fn ac_token_fields_do_not_touch() {
+        for local in [0, 1, 35, 255, 256, 510, 511] {
+            for place in [0u8, 1, 7, 8, 23, 31] {
+                for value in [0, 1, 63, 2046, 65_535, (1 << 18) - 1] {
+                    let t = AcToken::new(local, place, value);
+                    assert_eq!(
+                        (t.local(), t.place(), t.value()),
+                        (local, place as usize, value)
+                    );
+                }
+            }
+        }
+    }
+}

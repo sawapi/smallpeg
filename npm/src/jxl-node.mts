@@ -25,8 +25,8 @@ export type { Bytes, JxlOptions, JxlOutput } from "./jxl-core.mjs";
  * Recompress a JPEG as JPEG XL without changing its coefficients: the
  * image is the same, and a photo's file about 10% smaller. Color and
  * grayscale JPEGs; `undefined` for CMYK and RGB-coded files, frames over
- * 100 megapixels, and input this cannot read. The color profile, Exif and
- * XMP carry over.
+ * 100 megapixels, files over 512 MB, and input this cannot read. The
+ * color profile, Exif and XMP carry over.
  *
  * `reconstruction` in the result says whether a JPEG XL decoder can write
  * the original JPEG file back from it byte for byte.

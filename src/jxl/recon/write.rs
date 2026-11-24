@@ -122,19 +122,28 @@ pub(super) fn write(r: &Recon, p: &Parsed) -> Vec<u8> {
         .chain([r.tail])
         .collect();
     let mut out = w.out;
-    brotli_stored(&raw.concat(), &mut out);
+    brotli_stored(&raw, &mut out);
     out
 }
 
-/// `data` as a Brotli stream of uncompressed blocks. What goes here has
-/// little to gain from compression: short segments, or data compressed
-/// already.
-fn brotli_stored(data: &[u8], out: &mut Vec<u8>) {
+/// `parts`, one after another, as a Brotli stream of uncompressed blocks.
+/// What goes here has little to gain from compression: short segments, or
+/// data compressed already. It can be most of a file (comments, data
+/// after the end), so it is copied once, into room made for it.
+fn brotli_stored(parts: &[&[u8]], out: &mut Vec<u8>) {
+    const BLOCK: usize = 1 << 24;
+    let mut left: usize = parts.iter().map(|p| p.len()).sum();
+    // A block's header is at most 29 bits; the first has one bit before
+    // it, and two more end the stream.
+    out.reserve(left + 4 * left.div_ceil(BLOCK) + 2);
+    let mut parts = parts.iter().copied();
+    let mut part: &[u8] = &[];
     let mut w = Bits::default();
     w.put(1, 0); // window of 2^16
-    for chunk in data.chunks(1 << 24) {
+    while left > 0 {
+        let n = left.min(BLOCK);
         w.bit(false); // not the last block
-        let len = chunk.len() as u64 - 1;
+        let len = n as u64 - 1;
         let nibbles = if len < 1 << 16 {
             4
         } else if len < 1 << 20 {
@@ -146,10 +155,77 @@ fn brotli_stored(data: &[u8], out: &mut Vec<u8>) {
         w.put(4 * nibbles as u32, len);
         w.bit(true); // uncompressed
         w.pad();
-        w.out.extend_from_slice(chunk);
+        out.append(&mut w.out);
+        let mut need = n;
+        while need > 0 {
+            if part.is_empty() {
+                part = parts.next().expect("the parts hold what was counted");
+            }
+            let k = need.min(part.len());
+            out.extend_from_slice(&part[..k]);
+            part = &part[k..];
+            need -= k;
+        }
+        left -= n;
     }
     w.bit(true); // the last block,
     w.bit(true); // which is empty
     w.pad();
     out.extend_from_slice(&w.out);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stream is that of the parts joined, whatever their lengths and
+    /// wherever the 16 MB blocks fall.
+    #[test]
+    fn stored_stream_of_parts() {
+        // The stream written from one slice, a block at a time.
+        fn joined(data: &[u8]) -> Vec<u8> {
+            let mut w = Bits::default();
+            w.put(1, 0);
+            for chunk in data.chunks(1 << 24) {
+                w.bit(false);
+                let len = chunk.len() as u64 - 1;
+                let nibbles = 4 + (len >= 1 << 16) as u64 + (len >= 1 << 20) as u64;
+                w.put(2, nibbles - 4);
+                w.put(4 * nibbles as u32, len);
+                w.bit(true);
+                w.pad();
+                w.out.extend_from_slice(chunk);
+            }
+            w.bit(true);
+            w.bit(true);
+            w.pad();
+            w.out
+        }
+        let big: Vec<u8> = (0..(1usize << 24) + 70_000)
+            .map(|i| ((i * 31) >> 3) as u8)
+            .collect();
+        let cases: [&[&[u8]]; 6] = [
+            &[],
+            &[&[]],
+            &[b"a"],
+            &[b"one", &[], b"two", &big[..65_536], &big[..65_537]],
+            &[
+                &big[..(1 << 24) - 2],
+                b"abc",
+                &big[..1 << 20],
+                &big[5..(1 << 20) + 9],
+            ],
+            &[&big, &big[..(1 << 24) - 70_000]],
+        ];
+        for parts in cases {
+            let mut out = vec![7, 7];
+            brotli_stored(parts, &mut out);
+            assert_eq!(out[..2], [7, 7]);
+            assert!(
+                out[2..] == joined(&parts.concat())[..],
+                "{} parts",
+                parts.len()
+            );
+        }
+    }
 }

@@ -231,9 +231,9 @@ if (out) {
 ### `toJxl(jpeg, options?)`
 
 Returns `{ data, reconstruction }`, or `undefined` for a file it cannot
-convert (CMYK and RGB-coded JPEGs, frames over 100 megapixels, and input
-it cannot read). Color and
-grayscale JPEGs, baseline and progressive. The JPEG's coefficients are
+convert (CMYK and RGB-coded JPEGs, frames over 100 megapixels, files
+over 512 MB, and input it cannot read). Color and grayscale JPEGs,
+baseline and progressive. The JPEG's coefficients are
 stored as they are, so the image is the same; a photo's file comes out
 about 10% smaller. The color profile, Exif and XMP carry over
 (`stripMetadata` first removes Exif and XMP).
@@ -249,9 +249,12 @@ about 10% smaller. The color profile, Exif and XMP carry over
 
 It takes about 6 to 21 bytes of memory per pixel besides the JPEG and
 the result, more for full-color (4:4:4), high-quality and noisy images: a
-24-megapixel photo needs about 150 to 300 MB. At the 100-megapixel limit
-the worst case is about 3 GB, near the 4 GB a WebAssembly module can
-address, and a browser may refuse it well before that. Should the module
+24-megapixel photo needs about 150 to 500 MB. What the file holds besides
+the image (comments, application segments) is held once more when
+`reconstruction` is on, so a file that is mostly such data takes about
+three times its size. At the limits, 100 megapixels and 512 MB, the worst
+cases are about 3 GB, near the 4 GB a WebAssembly module can address,
+and a browser may refuse that much well before. Should the module
 trap (a `WebAssembly.RuntimeError`), it may be left unusable: restart
 the process in Node, reload the page in the browser.
 

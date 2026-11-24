@@ -206,6 +206,11 @@ function runJxl(lib, name) {
   // Not a JPEG this reads: undefined, like the other functions.
   assert.equal(lib.toJxl(new Uint8Array([1, 2, 3, 4])), undefined);
   assert.equal(lib.toJxl(jpeg.subarray(0, jpeg.length >> 1)), undefined);
+  // Nor a file over 512 MB, which is refused before it is copied in.
+  const huge = new Uint8Array(512 * 1024 * 1024 + 1);
+  huge.set(jpeg);
+  assert.equal(lib.toJxl(huge), undefined, `${name}: over the size limit`);
+  assert.throws(() => lib.toJxl(huge, { reconstruction: 1 }), { name: "TypeError" });
   assert.throws(() => lib.toJxl("not bytes"), { name: "TypeError", message: /^smallpeg: the JPEG/ });
   assert.throws(() => lib.toJxl(jpeg, { reconstruction: 1 }), { name: "TypeError", message: /^smallpeg: reconstruction/ });
   assert.throws(() => lib.toJxl(jpeg, []), { name: "TypeError", message: /^smallpeg: options/ });

@@ -54,6 +54,15 @@ export interface JxlApi {
   toJxl(jpeg: Uint8Array, options?: JxlOptions): JxlOutput | undefined;
 }
 
+/**
+ * The largest JPEG `toJxl` takes, in bytes. A conversion holds the file,
+ * the result and, for what the file has besides the image, the
+ * reconstruction data: about three times a file that is mostly comments
+ * or other segments. That and the 100 megapixels of the frame keep it
+ * within the 4 GB a WebAssembly module can address.
+ */
+const MAX_JPEG_BYTES = 512 * 1024 * 1024;
+
 export function makeJxlApi(glue: JxlBindings, ensureReady: () => void = () => {}): JxlApi {
   function toJxl(jpeg: Uint8Array, options?: JxlOptions): JxlOutput | undefined {
     ensureReady();
@@ -62,6 +71,7 @@ export function makeJxlApi(glue: JxlBindings, ensureReady: () => void = () => {}
     if (want !== undefined && typeof want !== "boolean") {
       throw new TypeError(`smallpeg: reconstruction must be a boolean, got ${show(want)}`);
     }
+    if (input.length > MAX_JPEG_BYTES) return undefined;
     const out = glue.to_jxl(input, want ?? true);
     if (!out) return undefined;
     try {
