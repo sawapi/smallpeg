@@ -7,6 +7,7 @@
 //                   then { type: "result", id, value } or { type: "error", id, error }
 
 import type { Api } from "./core.mjs";
+import type { JxlApi } from "./jxl-core.mjs";
 
 /**
  * The part of a `Worker`, `MessagePort` or worker global scope used here,
@@ -18,13 +19,8 @@ export interface Port {
   onmessageerror: ((event: unknown) => void) | null;
 }
 
-/**
- * {@link Api} with every function run in a worker: same arguments, the
- * result as a promise.
- */
-export type WorkerApi = {
-  [K in keyof Api]: (...args: Parameters<Api[K]>) => Promise<Awaited<ReturnType<Api[K]>>>;
-} & {
+/** What every worker client has besides its functions. */
+export interface WorkerControls {
   /**
    * Settles when the worker has loaded the wasm. Rejects if it could not
    * start or load it; every call then rejects with the same error.
@@ -37,11 +33,22 @@ export type WorkerApi = {
    * again does nothing.
    */
   terminate(): void;
-};
+}
+
+/**
+ * The functions of `A` run in a worker: same arguments, the result as a
+ * promise.
+ */
+export type InWorker<A> = {
+  [K in keyof A]: A[K] extends (...args: infer P) => infer R ? (...args: P) => Promise<Awaited<R>> : never;
+} & WorkerControls;
+
+/** {@link Api} with every function run in a worker. */
+export type WorkerApi = InWorker<Api>;
 
 // Every function of Api, for the client to forward. The check below fails
 // to compile if Api gains or loses one.
-const names = [
+export const names = [
   "encode",
   "optimize",
   "upright",
@@ -57,6 +64,18 @@ type Assert<T extends true> = T;
 type _Exhaustive = Assert<
   [keyof Api] extends [(typeof names)[number]]
     ? [(typeof names)[number]] extends [keyof Api]
+      ? true
+      : false
+    : false
+>;
+
+// The same for the functions of smallpeg/jxl, which a worker of their own
+// serves. Here, not beside them, so that worker's client loads no more
+// than this file.
+export const jxlNames = ["toJxl"] as const;
+type _JxlExhaustive = Assert<
+  [keyof JxlApi] extends [(typeof jxlNames)[number]]
+    ? [(typeof jxlNames)[number]] extends [keyof JxlApi]
       ? true
       : false
     : false
@@ -167,6 +186,16 @@ export function compact(v: unknown, transfer: ArrayBuffer[]): unknown {
  * answer calls one at a time, in the order they arrive.
  */
 export function serve(port: Port, api: Api, init: (wasm: unknown) => Promise<void>): void {
+  serveFns(port, api, init, names);
+}
+
+/** {@link serve} for any set of functions: `api` answers those named in `fns`. */
+export function serveFns<A>(
+  port: Port,
+  api: A,
+  init: (wasm: unknown) => Promise<void>,
+  fns: readonly (keyof A & string)[],
+): void {
   let ready: Promise<void> | undefined;
   let queue = Promise.resolve();
   let stopped: WireError | undefined;
@@ -191,8 +220,8 @@ export function serve(port: Port, api: Api, init: (wasm: unknown) => Promise<voi
         if (stopped) throw fromWire(stopped);
         if (!ready) throw new Error("smallpeg: the worker was not initialized");
         await ready;
-        if (!(names as readonly string[]).includes(fn)) throw new TypeError(`smallpeg: no function ${fn}`);
-        const value: unknown = (api[fn as keyof Api] as (...a: unknown[]) => unknown)(...args);
+        if (!(fns as readonly string[]).includes(fn)) throw new TypeError(`smallpeg: no function ${fn}`);
+        const value: unknown = (api[fn as keyof A] as (...a: unknown[]) => unknown)(...args);
         port.postMessage({ type: "result", id, value } satisfies WorkerMessage, transferables(value));
       } catch (e) {
         port.postMessage({ type: "error", id, error: toWire(e) } satisfies WorkerMessage, []);
@@ -228,6 +257,16 @@ export function connect(
   wasm: unknown,
   stop: () => void,
 ): { api: WorkerApi; fail: (e: Error) => void } {
+  return connectFns<Api>(port, wasm, stop, names);
+}
+
+/** {@link connect} for any set of functions: those named in `fns`. */
+export function connectFns<A>(
+  port: Port,
+  wasm: unknown,
+  stop: () => void,
+  fns: readonly (keyof A & string)[],
+): { api: InWorker<A>; fail: (e: Error) => void } {
   const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   let nextId = 0;
   let dead: Error | undefined;
@@ -305,7 +344,7 @@ export function connect(
       stop();
     },
   } as Record<string, unknown>;
-  for (const fn of names) api[fn] = (...args: unknown[]) => call(fn, args);
+  for (const fn of fns) api[fn] = (...args: unknown[]) => call(fn, args);
 
   try {
     const transfer: ArrayBuffer[] = [];
@@ -313,5 +352,5 @@ export function connect(
   } catch (e) {
     fail(sendError(e));
   }
-  return { api: api as WorkerApi, fail };
+  return { api: api as InWorker<A>, fail };
 }
