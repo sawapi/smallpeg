@@ -833,7 +833,55 @@ fn permutation_tokens(perm: &[usize; 64], out: &mut Tokens) {
 
 #[cfg(test)]
 mod tests {
-    use super::AcToken;
+    use super::{AcToken, Frame};
+    use crate::optimize::{Limits, parse_and_decode};
+
+    /// A grayscale frame of whole MCUs has blocks the component does not:
+    /// they are flat, and far enough above the image's DC values that a
+    /// decoder's smoothing leaves the real blocks beside them alone.
+    #[test]
+    fn padding_of_a_gray_frame_is_far_from_the_image() {
+        let gray: Vec<u8> = (0..150 * 91)
+            .map(|i| (i % 150 + i / 150 * 2) as u8)
+            .collect();
+        let jpeg = crate::Encoder::new(90).encode_gray(&gray, 150, 91);
+        let p = parse_and_decode(&jpeg, false, &Limits::default()).unwrap();
+        let c = &p.comps[0];
+        assert_eq!((c.aw, c.ah), (19, 12));
+        let real = |x: usize, y: usize| c.blocks[y * c.bw + x];
+        let dcs: Vec<i32> = (0..c.ah)
+            .flat_map(|y| (0..c.aw).map(move |x| (x, y)))
+            .map(|(x, y)| real(x, y)[0] as i32)
+            .collect();
+        let (lo, hi) = (*dcs.iter().min().unwrap(), *dcs.iter().max().unwrap());
+        assert!(hi > lo);
+        for (hv, fw, fh) in [((2, 1), 20, 12), ((1, 2), 19, 12), ((2, 2), 20, 12)] {
+            let f = Frame::new(&p, hv).unwrap();
+            let y = &f.ch[1];
+            let blocks = y.blocks.as_ref().unwrap();
+            assert_eq!((f.xblocks, f.yblocks, y.bw), (fw, fh, fw), "{hv:?}");
+            for by in 0..fh {
+                for bx in 0..fw {
+                    let b = blocks[by * fw + bx];
+                    if bx < c.aw && by < c.ah {
+                        assert_eq!(b, real(bx, by), "{hv:?} {bx} {by}");
+                    } else {
+                        assert!(b[1..].iter().all(|&v| v == 0), "{hv:?} {bx} {by}");
+                        assert!(
+                            b[0] as i32 >= hi + 3 + 3 * (hi - lo),
+                            "{hv:?} {bx} {by}: {}",
+                            b[0]
+                        );
+                    }
+                }
+            }
+        }
+        // Nothing to pad at 1x1: the component's own blocks.
+        assert!(matches!(
+            Frame::new(&p, (1, 1)).unwrap().ch[1].blocks,
+            Some(std::borrow::Cow::Borrowed(_))
+        ));
+    }
 
     /// The three fields come back as packed, at their ends and between.
     #[test]

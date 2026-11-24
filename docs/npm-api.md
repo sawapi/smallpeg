@@ -257,7 +257,10 @@ three times its size. At the limits, 100 megapixels and 512 MB, the worst
 cases are about 3 GB, near the 4 GB a WebAssembly module can address,
 and a browser may refuse that much well before. Should the module
 trap (a `WebAssembly.RuntimeError`), it may be left unusable: restart
-the process in Node, reload the page in the browser.
+the process in Node, reload the page in the browser. A module keeps the
+memory its largest conversion took, for as long as it is loaded: to give
+it back, run the conversion in a [worker](#jpeg-xl-in-a-web-worker) and
+terminate it, or in Node in a process of its own.
 
 ### Loading
 

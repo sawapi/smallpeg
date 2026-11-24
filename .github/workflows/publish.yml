@@ -59,6 +59,40 @@ jobs:
           fi
           echo "version=$crate" >> "$GITHUB_OUTPUT"
 
+      # What the uploads would otherwise find out, one of them after the
+      # other has gone through: a version already published, a branch
+      # other than main, notes still under "Unreleased". A dry run only
+      # warns, so it can run before the version is bumped.
+      - name: Ready to release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          CRATE: ${{ inputs.crate }}
+          NPM: ${{ inputs.npm }}
+        run: |
+          status=0
+          problem() {
+            if [ "$DRY_RUN" = true ]; then echo "::warning::$1"; else echo "::error::$1"; status=1; fi
+          }
+          [ "$GITHUB_REF" = refs/heads/main ] || problem "running on $GITHUB_REF, not main"
+          grep -q "^## $VERSION\$" CHANGELOG.md || problem "CHANGELOG.md has no '## $VERSION' section"
+          if [ "$CRATE" = true ]; then
+            code=$(curl -s -o /dev/null -w '%{http_code}' -A smallpeg-release-check "https://crates.io/api/v1/crates/smallpeg/$VERSION")
+            case "$code" in
+              404) ;;
+              200) problem "smallpeg $VERSION is already on crates.io" ;;
+              *) problem "crates.io answered $code when asked for smallpeg $VERSION" ;;
+            esac
+          fi
+          if [ "$NPM" = true ]; then
+            if out=$(npm view "smallpeg@$VERSION" version 2>&1); then
+              [ -z "$out" ] || problem "smallpeg $VERSION is already on npm"
+            else
+              echo "$out" | grep -q E404 || problem "npm could not be asked for smallpeg $VERSION: $out"
+            fi
+          fi
+          exit $status
+
       - name: Test the crate
         run: cargo test --release
 
@@ -107,8 +141,9 @@ jobs:
           node --input-type=module -e 'import { encode, decode } from "smallpeg"; const j = encode({ data: new Uint8Array(64), width: 4, height: 4 }); if (decode(j).width !== 4) process.exit(1); console.log("import ok", j.length)'
           node -e 'const s = require("smallpeg"); const x = require("smallpeg/jxl"); const o = x.toJxl(s.encode({ data: new Uint8Array(192), width: 8, height: 8 })); if (!o.reconstruction || o.data[4] !== 0x4a) process.exit(1); console.log("jxl require ok", o.data.length)'
           node --input-type=module -e 'import { encode } from "smallpeg"; import { toJxl } from "smallpeg/jxl"; import * as web from "smallpeg/jxl/web"; const o = toJxl(encode({ data: new Uint8Array(192), width: 8, height: 8 })); if (!o.reconstruction || typeof web.init !== "function") process.exit(1); console.log("jxl import ok", o.data.length)'
-          # The published types resolve for a consumer, for both entry points.
-          printf '%s\n' 'import { encode, type Image } from "smallpeg";' 'import { init } from "smallpeg/web";' 'await init();' 'const i: Image = { data: new Uint8Array(3), width: 1, height: 1, channels: 3 };' 'encode(i, { quality: 90 });' > check.mts
+          node --input-type=module -e 'const w = await import("smallpeg/worker"); const j = await import("smallpeg/jxl/worker"); for (const m of [w, j]) { try { m.createWorker(); process.exit(1); } catch (e) { if (!/needs Web Workers/.test(e.message)) throw e; } } console.log("worker entry points ok")'
+          # The published types resolve for a consumer, for every entry point.
+          printf '%s\n' 'import { encode, type Image } from "smallpeg";' 'import { init } from "smallpeg/web";' 'import { toJxl, type JxlOutput } from "smallpeg/jxl";' 'import { init as initJxl } from "smallpeg/jxl/web";' 'import { createWorker, type WorkerApi } from "smallpeg/worker";' 'import { createWorker as createJxlWorker, type JxlWorkerApi } from "smallpeg/jxl/worker";' 'await init();' 'await initJxl();' 'const i: Image = { data: new Uint8Array(3), width: 1, height: 1, channels: 3 };' 'const o: JxlOutput | undefined = toJxl(encode(i, { quality: 90 }));' 'const w: WorkerApi = createWorker();' 'const j: JxlWorkerApi = createJxlWorker();' 'void [o, w, j];' > check.mts
           "$GITHUB_WORKSPACE"/npm/node_modules/.bin/tsc --noEmit --strict --module nodenext --target es2022 --lib es2022,dom --types "" check.mts
 
   publish-crate:

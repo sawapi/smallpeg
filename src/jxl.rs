@@ -53,7 +53,8 @@ use frame::Frame;
 /// needs about 150 to 500 MB. [`JxlOptions::limits`] bounds the frame it
 /// accepts. What the file holds besides the image (comments, application
 /// segments, data after the end) is held once more for the
-/// reconstruction data.
+/// reconstruction data, and a result with that data, Exif or XMP is held
+/// twice for a moment at the end.
 ///
 /// Experimental (the `jxl` feature): this function and its output may
 /// change in any release.
@@ -151,7 +152,7 @@ pub fn jpeg_to_jxl_with(data: &[u8], options: &JxlOptions) -> Option<JxlOutput> 
         data: if meta.exif.is_none() && meta.xmp.is_none() && jbrd.is_none() {
             codestream
         } else {
-            container(&codestream, &meta, jbrd.as_deref())
+            container(&codestream, &meta, jbrd.as_deref())?
         },
     })
 }
@@ -230,7 +231,9 @@ impl Meta {
 
 /// The codestream in the JPEG XL container, with the reconstruction data
 /// and Exif and XMP boxes.
-fn container(codestream: &[u8], meta: &Meta, jbrd: Option<&[u8]>) -> Vec<u8> {
+/// The file as boxes. `None` if one would not fit the 32 bits of a box's
+/// length, which the limits on the frame and on the segments rule out.
+fn container(codestream: &[u8], meta: &Meta, jbrd: Option<&[u8]>) -> Option<Vec<u8>> {
     // At its size: growing a file this large would hold it twice.
     let boxed = |part: Option<usize>, head: usize| part.map_or(0, |n| 8 + head + n);
     let size = 12
@@ -240,6 +243,9 @@ fn container(codestream: &[u8], meta: &Meta, jbrd: Option<&[u8]>) -> Vec<u8> {
         + boxed(meta.xmp.as_ref().map(Vec::len), 0)
         + 8
         + codestream.len();
+    if size > u32::MAX as usize {
+        return None;
+    }
     let mut out = Vec::with_capacity(size);
     let mut push_box = |kind: &[u8; 4], parts: &[&[u8]]| {
         let len: usize = 8 + parts.iter().map(|p| p.len()).sum::<usize>();
@@ -262,7 +268,7 @@ fn container(codestream: &[u8], meta: &Meta, jbrd: Option<&[u8]>) -> Vec<u8> {
     }
     push_box(b"jxlc", &[codestream]);
     debug_assert_eq!(out.len(), size);
-    out
+    Some(out)
 }
 
 #[cfg(test)]
@@ -290,10 +296,12 @@ mod tests {
             ),
             ("lagoon.jpg", 0x5b645645dc391a64, 0x30f9e0ba04783fe0),
         ] {
-            // The samples are not in the published crate.
-            let Ok(jpeg) = std::fs::read(format!("{dir}{name}")) else {
-                continue;
-            };
+            // The samples are not in the published crate, which has no
+            // such directory; where it is, they have to be in it.
+            if !std::path::Path::new(dir).is_dir() {
+                return;
+            }
+            let jpeg = std::fs::read(format!("{dir}{name}")).expect(name);
             let got = [true, false].map(|on| {
                 let options = JxlOptions::default().reconstruction(on);
                 let out = jpeg_to_jxl_with(&jpeg, &options).unwrap();
@@ -301,6 +309,60 @@ mod tests {
                 fnv(&out.data)
             });
             assert_eq!(got, [with, without], "{name}: {got:#018x?}");
+        }
+    }
+
+    /// Every way the boxes combine: the file is its boxes end to end, in
+    /// order, each with what it should hold. (In a debug build `container`
+    /// also checks the size it reserved.)
+    #[test]
+    fn container_boxes() {
+        let tiff = b"II*\0\x08\0\0\0\0\0\0\0\0\0".to_vec();
+        let packet = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>".to_vec();
+        let rgb: Vec<u8> = (0..48 * 40 * 3).map(|i| (i * 5 % 253) as u8).collect();
+        for (exif, xmp, rec) in (0..8).map(|i| (i & 1 != 0, i & 2 != 0, i & 4 != 0)) {
+            let mut e = crate::Encoder::new(85);
+            if exif {
+                e = e.exif(&tiff);
+            }
+            let mut jpeg = e.encode_rgb(&rgb, 48, 40);
+            if xmp {
+                let mut seg = vec![0xFF, 0xE1, 0, (2 + 29 + packet.len()) as u8];
+                seg.extend_from_slice(b"http://ns.adobe.com/xap/1.0/\0");
+                seg.extend_from_slice(&packet);
+                jpeg.splice(2..2, seg);
+            }
+            let options = JxlOptions::default().reconstruction(rec);
+            let out = jpeg_to_jxl_with(&jpeg, &options).unwrap();
+            assert_eq!(out.reconstruction, rec);
+            let d = &out.data;
+            if !(exif || xmp || rec) {
+                assert_eq!(d[..2], [0xFF, 0x0A], "a bare codestream");
+                continue;
+            }
+            let mut boxes = Vec::new();
+            let mut at = 0;
+            while at < d.len() {
+                let len = u32::from_be_bytes(d[at..at + 4].try_into().unwrap()) as usize;
+                assert!(len >= 8 && at + len <= d.len(), "{exif} {xmp} {rec}");
+                boxes.push((&d[at + 4..at + 8], &d[at + 8..at + len]));
+                at += len;
+            }
+            let kinds: Vec<&[u8]> = boxes.iter().map(|b| b.0).collect();
+            let mut want: Vec<&[u8]> = vec![b"JXL ", b"ftyp"];
+            want.extend(rec.then_some(&b"jbrd"[..]));
+            want.extend(exif.then_some(&b"Exif"[..]));
+            want.extend(xmp.then_some(&b"xml "[..]));
+            want.push(b"jxlc");
+            assert_eq!(kinds, want, "{exif} {xmp} {rec}");
+            for (kind, body) in boxes {
+                match kind {
+                    b"Exif" => assert_eq!(body, [&[0u8; 4][..], &tiff].concat()),
+                    b"xml " => assert_eq!(body, packet),
+                    b"jxlc" => assert_eq!(body[..2], [0xFF, 0x0A]),
+                    _ => {}
+                }
+            }
         }
     }
 
