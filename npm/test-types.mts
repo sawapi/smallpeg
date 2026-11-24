@@ -23,6 +23,8 @@ import { createWorker, type WorkerApi } from "smallpeg/worker";
 import initJxl, { toJxl, type JxlOptions, type JxlOutput } from "smallpeg/jxl";
 import type { Bytes as JxlBytes } from "smallpeg/jxl";
 import * as jxlWeb from "smallpeg/jxl/web";
+import { createWorker as createJxlWorker, type JxlWorkerApi } from "smallpeg/jxl/worker";
+import type { JxlOutput as WorkerJxlOutput, WorkerOptions as JxlWorkerOptions } from "smallpeg/jxl/worker";
 import type { Image as WorkerImage } from "smallpeg/worker";
 
 declare const jpeg: Uint8Array;
@@ -119,4 +121,23 @@ w.init();
 // @ts-expect-error decode can give undefined
 const wsure: Image = await w.decode(wjpeg);
 
-export { a, b, maybe, sure, wmaybe, wimg, wsize, wsame, wsync, wsure };
+// The JPEG XL worker: toJxl alone, promised.
+const jxlWorkerOptions: JxlWorkerOptions = { wasm: "https://example.com/smallpeg_jxl_wasm_bg.wasm" };
+const jw: JxlWorkerApi = createJxlWorker(jxlWorkerOptions);
+createJxlWorker();
+await jw.ready;
+const wjxl: WorkerJxlOutput | undefined = await jw.toJxl(jpeg, { reconstruction: false });
+const wjxlSame: JxlOutput | undefined = await jw.toJxl(jpeg);
+jw.terminate();
+// @ts-expect-error results are promises
+const wjxlSync: JxlOutput | undefined = jw.toJxl(jpeg);
+// @ts-expect-error options are checked as for toJxl
+jw.toJxl(jpeg, { reconstructon: false });
+// @ts-expect-error the main functions are on the other worker
+jw.encode(rgb);
+// @ts-expect-error and toJxl is not on the main one
+w.toJxl(jpeg);
+// @ts-expect-error the worker loads the wasm itself
+jw.init();
+
+export { a, b, maybe, sure, wmaybe, wimg, wsize, wsame, wsync, wsure, wjxl, wjxlSame, wjxlSync };

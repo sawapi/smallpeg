@@ -226,6 +226,24 @@ await jxlWeb.init(readFileSync(new URL("./jxl-web/smallpeg_jxl_wasm_bg.wasm", im
 assert.deepEqual(runJxl(jxlWeb, "jxl web"), fromNode, "the two jxl builds give the same file");
 assert.deepEqual(Object.keys(jxlNode).sort(), Object.keys(jxlWeb).sort());
 assert.deepEqual(Object.keys(jxlNode).sort(), ["default", "init", "initSync", "toJxl"]);
+// Its worker entry point's protocol, over a MessageChannel.
+const { testJxlWorker } = await import("./test-worker.mjs");
+await testJxlWorker(jxlWeb, web);
+// The worker entry points need Web Workers, and say so.
+for (const entry of ["smallpeg/worker", "smallpeg/jxl/worker"]) {
+  const { createWorker, ...rest } = await import(entry);
+  assert.deepEqual(Object.keys(rest), [], `${entry}: one export`);
+  assert.throws(() => createWorker(), { name: "TypeError", message: "smallpeg: createWorker needs Web Workers" });
+}
+// What they start, and what the scripts they start serve.
+{
+  const { testWorkerEntries } = await import("./test-worker.mjs");
+  const small = web.encode({ data: new Uint8Array(40 * 30 * 3).map((_, i) => i * 3), width: 40, height: 30 });
+  await testWorkerEntries([
+    ["smallpeg/worker", "worker-main.mjs", Object.keys(web).filter((k) => !["default", "init", "initSync"].includes(k)), (w) => w.info(small), web.info(small)],
+    ["smallpeg/jxl/worker", "jxl-worker-main.mjs", ["toJxl"], (w) => w.toJxl(small), jxlWeb.toJxl(small)],
+  ]);
+}
 // It stays out of the main entry points.
 assert.equal(node.toJxl, undefined);
 assert.equal(web.toJxl, undefined);

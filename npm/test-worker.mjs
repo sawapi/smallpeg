@@ -4,7 +4,9 @@
 // browser build has been loaded and checked.
 import assert from "node:assert/strict";
 import { MessageChannel } from "node:worker_threads";
-import { connect, serve } from "./dist/protocol.mjs";
+import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
+import { connect, connectFns, jxlNames, names, serve, serveFns } from "./dist/protocol.mjs";
 
 function message(f) {
   try {
@@ -305,4 +307,159 @@ export async function testWorker(web, jpeg) {
   assert.throws(() => entry.createWorker(), /^TypeError: smallpeg: createWorker needs Web Workers$/);
   assert.deepEqual(Object.keys(entry), ["createWorker"]);
   console.log("worker protocol: ok");
+}
+
+// The same protocol with the functions of smallpeg/jxl, as its
+// createWorker() and worker script wire it.
+export async function testJxlWorker(jxlWeb, web) {
+  function pair(api = jxlWeb) {
+    const { port1, port2 } = new MessageChannel();
+    serveFns(port2, api, (w) => jxlWeb.init(w), jxlNames);
+    return connectFns(
+      port1,
+      undefined,
+      () => {
+        port1.close();
+        port2.close();
+      },
+      jxlNames,
+    );
+  }
+  const jpeg = web.encode({ data: new Uint8Array(40 * 30 * 3).map((_, i) => i * 5), width: 40, height: 30 });
+
+  const w = pair();
+  assert.deepEqual(Object.keys(w.api).sort(), ["ready", "terminate", "toJxl"]);
+  await w.api.ready;
+  // Same results as calling the browser build directly; the JPEG is copied.
+  assert.deepEqual(await w.api.toJxl(jpeg), jxlWeb.toJxl(jpeg));
+  assert.deepEqual(await w.api.toJxl(jpeg, { reconstruction: false }), jxlWeb.toJxl(jpeg, { reconstruction: false }));
+  assert.equal(await w.api.toJxl(new Uint8Array([1, 2, 3])), undefined);
+  assert.ok(jpeg.byteLength > 0, "the caller's buffer is not detached");
+  await assert.rejects(w.api.toJxl(jpeg, { reconstruction: 1 }), (e) => {
+    assert.equal(`${e.name}: ${e.message}`, message(() => jxlWeb.toJxl(jpeg, { reconstruction: 1 })));
+    return e instanceof TypeError;
+  });
+  // Only its own functions: the main ones are not served here, whatever
+  // the object behind it has.
+  w.api.terminate();
+  await assert.rejects(w.api.toJxl(jpeg), /^Error: smallpeg: worker terminated$/);
+  {
+    const { port1, port2 } = new MessageChannel();
+    serveFns(port2, { ...jxlWeb, encode: web.encode, init: jxlWeb.init }, (x) => jxlWeb.init(x), jxlNames);
+    const c = connect(port1, undefined, () => {
+      port1.close();
+      port2.close();
+    });
+    for (const call of [c.api.encode({ data: new Uint8Array(3), width: 1, height: 1 }), c.api.info(jpeg)]) {
+      await assert.rejects(call, /^TypeError: smallpeg: no function (encode|info)$/);
+    }
+    c.api.terminate();
+  }
+
+  // The file's bytes are moved out of the worker, not copied.
+  {
+    const served = [];
+    const w = pair({
+      ...jxlWeb,
+      toJxl: (...a) => {
+        const r = jxlWeb.toJxl(...a);
+        served.push(r);
+        return r;
+      },
+    });
+    const out = await w.api.toJxl(jpeg);
+    assert.equal(served[0].data.byteLength, 0, "the file transferred");
+    assert.ok(out.data.byteLength > 0 && out.reconstruction === true);
+    w.api.terminate();
+  }
+
+  // After a WebAssembly trap the worker stops, as the main one does.
+  {
+    const w = pair({
+      ...jxlWeb,
+      toJxl: () => {
+        throw new WebAssembly.RuntimeError("unreachable");
+      },
+    });
+    await assert.rejects(w.api.toJxl(jpeg), (e) => e.name === "RuntimeError");
+    await assert.rejects(w.api.toJxl(jpeg), /the worker stopped after a WebAssembly error \(unreachable\); create a new one$/);
+    w.api.terminate();
+  }
+  console.log("jxl worker protocol: ok");
+}
+
+// The entry points themselves, which need a browser: with a stand-in for
+// `Worker`, that createWorker() starts its own script (directly, and by
+// the same-origin script it falls back to); and with a stand-in for the
+// worker's `self`, that the script serves its own functions and no others.
+// `cases` is [entry, script, names, a call that works, its direct result].
+export async function testWorkerEntries(cases) {
+  const real = { Worker: globalThis.Worker, self: globalThis.self, setTimeout: globalThis.setTimeout };
+  try {
+    for (const [entry, script, fns, call, want] of cases) {
+      const { createWorker } = await import(entry);
+      // Started directly.
+      const started = [];
+      globalThis.Worker = class {
+        constructor(url, options) {
+          started.push([url, options]);
+        }
+        postMessage() {}
+        terminate() {}
+      };
+      const direct = createWorker();
+      assert.deepEqual(Object.keys(direct).sort(), [...fns, "ready", "terminate"].sort(), entry);
+      direct.terminate();
+      assert.equal(started.length, 1);
+      assert.ok(started[0][0] instanceof URL && started[0][0].href.endsWith(`/dist/${script}`), `${entry} starts ${script}`);
+      assert.ok(existsSync(fileURLToPath(started[0][0])), `${script} is in the package`);
+      assert.deepEqual(started[0][1], { type: "module" });
+      // From another origin the first start throws: a same-origin script
+      // that imports the same file is started instead.
+      const imported = [];
+      globalThis.setTimeout = () => 0; // the revoke of the script's URL
+      globalThis.Worker = class {
+        constructor(url) {
+          if (url instanceof URL) throw new Error("SecurityError");
+          imported.push(fetch(url).then((r) => r.text()));
+        }
+        postMessage() {}
+        terminate() {}
+      };
+      createWorker().terminate();
+      assert.equal(await imported[0], `import ${JSON.stringify(started[0][0].href)};`, `${entry}: the fallback imports ${script}`);
+      globalThis.setTimeout = real.setTimeout;
+      // When that fails too, the first reason is given.
+      globalThis.Worker = class {
+        constructor() {
+          throw new Error("no workers here");
+        }
+      };
+      await assert.rejects(createWorker().ready, /^Error: smallpeg: the worker failed to start: no workers here$/);
+
+      // The script: over a port standing in for `self`.
+      const { port1, port2 } = new MessageChannel();
+      globalThis.self = port2;
+      await import(started[0][0].href);
+      globalThis.self = real.self;
+      const stop = () => {
+        port1.close();
+        port2.close();
+      };
+      // Asked for every function of both sets, it answers its own only.
+      const all = connectFns(port1, undefined, stop, [...new Set([...names, ...jxlNames])]);
+      await all.api.ready;
+      assert.deepEqual(await call(all.api), want, `${script} serves its functions`);
+      for (const fn of [...names, ...jxlNames].filter((f) => !fns.includes(f))) {
+        await assert.rejects(all.api[fn](), new RegExp(`^TypeError: smallpeg: no function ${fn}$`), `${script} does not serve ${fn}`);
+      }
+      all.api.terminate();
+    }
+  } finally {
+    for (const [k, v] of Object.entries(real)) {
+      if (v === undefined) delete globalThis[k];
+      else globalThis[k] = v;
+    }
+  }
+  console.log("worker entry points: ok");
 }

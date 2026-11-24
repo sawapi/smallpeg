@@ -18,9 +18,12 @@ entries before it record development that preceded publication.
   `toJxl(jpeg, options?)`, the experimental JPEG to JPEG XL conversion.
   It returns `{ data, reconstruction }`, or `undefined` for a file it
   cannot convert, which includes frames over 100 megapixels and files
-  over 512 MB. They have a `.wasm` file of their own, so the main
-  entry points load no more than before. Experimental: may change in any
-  release.
+  over 512 MB. They share a `.wasm` file apart from the main one, so the
+  main entry points load no more than before. A third,
+  `smallpeg/jxl/worker`, runs the conversion in a Web Worker:
+  its `createWorker()` gives `toJxl`, `ready` and `terminate()`, and the
+  worker of `smallpeg/worker` stays as it is. Experimental: may change
+  in any release.
 - `jxl` feature (experimental): `jpeg_to_jxl` and `jpeg_to_jxl_with`
   return a `JxlOutput` with the file in `data` and, in `reconstruction`,
   whether it holds what rebuilds the original JPEG byte for byte. They

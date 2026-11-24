@@ -80,6 +80,7 @@ const jpeg = await smallpeg.encode(ctx.getImageData(0, 0, w, h));
 | `init(wasm?)`, `initSync(bytes)` | Load the WebAssembly module (browser build; no-ops in Node) |
 | `createWorker({ wasm? })` (from `/worker`) | The functions above returning promises, run in a Web Worker; `ready`, `terminate()` |
 | `toJxl(jpeg, { reconstruction })` (from `/jxl`, experimental) | `{ data, reconstruction }`: the JPEG as JPEG XL with the same image, or `undefined` |
+| `createWorker({ wasm? })` (from `/jxl/worker`, experimental) | `toJxl` returning a promise, run in a Web Worker; `ready`, `terminate()` |
 
 Images are plain `{ data, width, height, channels }` objects, and every
 image a function returns can be passed to the next. Details, options and

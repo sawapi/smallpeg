@@ -11,6 +11,7 @@ function's documentation shows up in editors.
 | `"smallpeg/web"` | Browsers and bundlers, explicitly |
 | `"smallpeg/worker"` | Browsers and bundlers: the same functions run in a Web Worker ([below](#in-a-web-worker)) |
 | `"smallpeg/jxl"`, `"smallpeg/jxl/web"` | Experimental: JPEG to JPEG XL ([below](#experimental-jpeg-xl)), with a `.wasm` file of its own |
+| `"smallpeg/jxl/worker"` | Experimental: that conversion run in a Web Worker ([below](#jpeg-xl-in-a-web-worker)), in browsers and bundlers |
 
 The first two export the same functions. The browser build has to load its `.wasm`
 file before use:
@@ -266,7 +267,30 @@ pages that do not use it do not load it. `init` and `initSync` work as for
 the main entry points, on that file: loading one does not load the other.
 `"smallpeg/jxl"` resolves to the Node build in Node and to the browser
 build elsewhere; `"smallpeg/jxl/web"` is the browser build explicitly.
-There is no worker entry point for it yet.
+
+### JPEG XL in a Web Worker
+
+A conversion is among the longest calls in the package (a good part of a
+second for a large photo) and the one that takes the most memory, so a
+page does well to run it in a worker:
+
+```js
+import { createWorker } from "smallpeg/jxl/worker";
+
+const jxl = createWorker();
+const out = await jxl.toJxl(jpeg);
+jxl.terminate(); // when done
+```
+
+It is a worker of its own, with `toJxl`, `ready` and `terminate()`, which
+loads this entry point's `.wasm` and not the main one; the worker of
+`"smallpeg/worker"` does not have `toJxl`. Everything said of that one
+[above](#in-a-web-worker) holds here: the JPEG is copied in and the file
+moved back, calls run one at a time, `createWorker({ wasm })` takes the
+same kinds of source (for `jxl-web/smallpeg_jxl_wasm_bg.wasm`), and a
+call that traps stops the worker, which can then be replaced where a page
+would have to be reloaded. A JPEG over the 512 MB limit is still copied
+to the worker before it is refused.
 
 ## Example: shrink a photo for upload
 
