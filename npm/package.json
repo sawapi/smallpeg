@@ -1,6 +1,6 @@
 {
   "name": "smallpeg",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "description": "A dependency-free JPEG encoder, lossless optimizer and decoder, compiled to WebAssembly for Node and the browser.",
   "license": "(MIT OR Apache-2.0)",
   "main": "./dist/node.mjs",
