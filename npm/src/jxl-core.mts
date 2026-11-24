@@ -74,11 +74,18 @@ export function makeJxlApi(glue: JxlBindings, ensureReady: () => void = () => {}
     if (input.length > MAX_JPEG_BYTES) return undefined;
     const out = glue.to_jxl(input, want ?? true);
     if (!out) return undefined;
+    let result: JxlOutput;
     try {
-      return { data: owned(out.take_data()), reconstruction: out.reconstruction };
-    } finally {
-      out.free();
+      result = { data: owned(out.take_data()), reconstruction: out.reconstruction };
+    } catch (e) {
+      // Whatever freeing does now, this is the error to report.
+      try {
+        out.free();
+      } catch {}
+      throw e;
     }
+    out.free();
+    return result;
   }
 
   return { toJxl };

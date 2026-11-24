@@ -12,7 +12,8 @@ entries before it record development that preceded publication.
   are let go as they are used. What a file holds besides the image
   (comments, application segments) is copied once into the
   reconstruction data and once into the result: a file that is mostly
-  such data takes about three times its size, down from about six. The
+  such data takes about three times its size, down from about six, and
+  a result in a container is held twice for a moment at the end. The
   output is unchanged.
 - npm: new entry points `smallpeg/jxl` and `smallpeg/jxl/web` with
   `toJxl(jpeg, options?)`, the experimental JPEG to JPEG XL conversion.
